@@ -1,7 +1,7 @@
--- Aeronautics PID Controller v1.0.5
+-- Aeronautics PID Controller v1.0.6
 -- Height controller using CC: Sable and CC: Redstone Link Bridge
 
-local VERSION        = "1.0.5"
+local VERSION        = "1.0.6"
 local CONFIG_PATH    = fs.getDir(shell.getRunningProgram()) .. "/config.json"
 local DEFAULT_KP     = 2.0
 local DEFAULT_KI     = 0.05
@@ -308,7 +308,9 @@ local function runCalibration(cfg)
                 safetyFail = true; break
             end
 
-            relayOut = (currentY < targetY) and RELAY_HIGH or RELAY_LOW
+            local velocityY  = sublevel.getLinearVelocity().y
+            local predictedY = currentY + velocityY * 1.5
+            relayOut = (predictedY < targetY) and RELAY_HIGH or RELAY_LOW
             bridge.sendLinkSignal(cfg.outFreq1, cfg.outFreq2, relayOut)
 
             if prevY ~= nil then
