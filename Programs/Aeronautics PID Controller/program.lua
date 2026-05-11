@@ -7,6 +7,9 @@ local DEFAULT_KI     = 0.05
 local DEFAULT_KD     = 1.0
 local LOOP_INTERVAL  = 0.1
 local INTEGRAL_CLAMP = 100
+local MAX_HISTORY    = 200
+
+local history = {}
 
 local W, H    = term.getSize()
 local isColor = term.isColour()
@@ -47,6 +50,13 @@ local function saveConfig(cfg)
     local f = fs.open(CONFIG_PATH, "w")
     f.write(textutils.serialiseJSON(cfg))
     f.close()
+end
+
+local function pushHistory(actual, target)
+    history[#history + 1] = { actual = actual, target = target }
+    if #history > MAX_HISTORY then
+        table.remove(history, 1)
+    end
 end
 
 --------------------------------------------------------------------------------
@@ -90,6 +100,72 @@ local function drawStatus(currentY, targetY, rawSignal, output, err, cfg)
     resetColors()
 
     drawFooter("[Q] Quit   [R] Reconfigure")
+end
+
+--------------------------------------------------------------------------------
+-- Monitor graph
+--------------------------------------------------------------------------------
+
+local function drawGraph(mon, cfg)
+    if not mon then return end
+
+    local mW, mH = mon.getSize()
+    mon.setTextScale(0.5)
+    mW, mH = mon.getSize()
+
+    local isMonColor = mon.isColour()
+    mon.setBackgroundColour and mon.setBackgroundColour(colours.black)
+    mon.clear()
+
+    -- visible Y range: minHeight/maxHeight with 10% padding
+    local range  = cfg.maxHeight - cfg.minHeight
+    local pad    = range * 0.1
+    local loY    = cfg.minHeight - pad
+    local hiY    = cfg.maxHeight + pad
+
+    local function heightToRow(h)
+        local frac = (h - loY) / (hiY - loY)
+        return mH - math.floor(frac * (mH - 1))
+    end
+
+    -- draw min/max height labels on right edge
+    local maxLabel = tostring(math.floor(cfg.maxHeight))
+    local minLabel = tostring(math.floor(cfg.minHeight))
+    if isMonColor then mon.setTextColour(colours.lightGrey) end
+    mon.setCursorPos(mW - #maxLabel + 1, 1)
+    mon.write(maxLabel)
+    mon.setCursorPos(mW - #minLabel + 1, mH)
+    mon.write(minLabel)
+
+    -- draw the last mW samples (one per column)
+    local graphW = mW - #maxLabel
+    local start  = math.max(1, #history - graphW + 1)
+
+    for i = start, #history do
+        local col    = i - start + 1
+        local sample = history[i]
+
+        local actualRow = clamp(heightToRow(sample.actual), 1, mH)
+        local targetRow = clamp(heightToRow(sample.target), 1, mH)
+
+        if actualRow == targetRow then
+            if isMonColor then mon.setTextColour(colours.white)
+            else mon.setTextColour(colours.white) end
+            mon.setCursorPos(col, actualRow)
+            mon.write("*")
+        else
+            -- actual height
+            if isMonColor then mon.setTextColour(colours.yellow) end
+            mon.setCursorPos(col, actualRow)
+            mon.write(isMonColor and "*" or "+")
+            -- target height
+            if isMonColor then mon.setTextColour(colours.cyan) end
+            mon.setCursorPos(col, targetRow)
+            mon.write(isMonColor and "*" or "-")
+        end
+    end
+
+    if isMonColor then mon.setTextColour(colours.white) end
 end
 
 --------------------------------------------------------------------------------
@@ -207,7 +283,9 @@ local function controlLoop()
         local output    = clamp(math.floor(outputF + 0.5), 0, 15)
 
         bridge.sendLinkSignal(cfg.outFreq1, cfg.outFreq2, output)
+        pushHistory(currentY, targetY)
         drawStatus(currentY, targetY, rawSignal, output, err, cfg)
+        drawGraph(peripheral.find("monitor"), cfg)
 
         sleep(LOOP_INTERVAL)
     end
@@ -237,6 +315,7 @@ while true do
         break
     elseif action == "reconfigure" then
         cfg = runSetup(cfg)
+        history = {}
         resetPID()
     end
 end
