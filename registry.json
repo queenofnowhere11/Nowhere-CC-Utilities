@@ -1,6 +1,6 @@
 {
-  "startup_version": "1.0.0",
-  "nowhereos_version": "1.0.0",
+  "startup_version": "1.0.1",
+  "nowhereos_version": "1.0.1",
   "programs": [
     {
       "id": "elevator-controller",
