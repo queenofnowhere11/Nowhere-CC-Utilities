@@ -1,6 +1,7 @@
 -- Aeronautics PID Controller v1.0.0
 -- Height controller using CC: Sable and CC: Redstone Link Bridge
 
+local VERSION        = "1.0.0"
 local CONFIG_PATH    = fs.getDir(shell.getRunningProgram()) .. "/config.json"
 local DEFAULT_KP     = 2.0
 local DEFAULT_KI     = 0.05
@@ -66,7 +67,7 @@ end
 local function drawHeader(title)
     term.setCursorPos(1, 1)
     fg(colours.black); bg(colours.cyan)
-    writePadded(" " .. (title or "Aeronautics PID Controller"))
+    writePadded(" " .. (title or ("Aeronautics PID Controller v" .. VERSION)))
     resetColors()
 end
 
