@@ -1,7 +1,7 @@
--- Aeronautics PID Controller v1.0.0
+-- Aeronautics PID Controller v1.0.5
 -- Height controller using CC: Sable and CC: Redstone Link Bridge
 
-local VERSION        = "1.0.4"
+local VERSION        = "1.0.5"
 local CONFIG_PATH    = fs.getDir(shell.getRunningProgram()) .. "/config.json"
 local DEFAULT_KP     = 2.0
 local DEFAULT_KI     = 0.05
@@ -249,16 +249,14 @@ end
 --------------------------------------------------------------------------------
 
 local function runCalibration(cfg)
-    local RELAY_HIGH   = 15
-    local RELAY_LOW    = 0
-    local RELAY_AMP    = 7.5
+    local RELAY_DELTA  = 4
     local MAX_DURATION = 60
     local MIN_CYCLES   = 3
     local DEADBAND     = 0.5
 
     local targetY = (cfg.minHeight + cfg.maxHeight) / 2
 
-    -- Phase A: Instructions
+    -- Phase A: Instructions + hover estimate
     term.clear()
     drawHeader("Auto-Calibration")
     term.setCursorPos(1, 3)
@@ -273,8 +271,18 @@ local function runCalibration(cfg)
     resetColors()
     print("")
     print("  Ensure the aircraft is clear of obstacles.")
-    drawFooter("[Enter] Begin   [Q] Cancel")
+    print("")
 
+    term.write("  Approx. hover output (0-15) [8]: ")
+    local hoverInput = read()
+    local hoverEst   = tonumber(hoverInput) or 8
+    hoverEst = clamp(math.floor(hoverEst + 0.5), 0, 15)
+
+    local RELAY_HIGH = clamp(hoverEst + RELAY_DELTA, 0, 15)
+    local RELAY_LOW  = clamp(hoverEst - RELAY_DELTA, 0, 15)
+    local RELAY_AMP  = (RELAY_HIGH - RELAY_LOW) / 2
+
+    term.write("  Relay: " .. RELAY_LOW .. " / " .. RELAY_HIGH .. "   Press Enter to begin, Q to cancel. ")
     while true do
         local _, key = os.pullEvent("key")
         if key == keys.enter then break
@@ -296,7 +304,7 @@ local function runCalibration(cfg)
             local elapsed  = os.epoch("utc") / 1000 - startTime
             local currentY = sublevel.getLogicalPose().position.y
 
-            if currentY < cfg.minHeight - 10 or currentY > cfg.maxHeight + 10 then
+            if currentY < targetY - 50 or currentY > targetY + 50 then
                 safetyFail = true; break
             end
 
@@ -368,7 +376,7 @@ local function runCalibration(cfg)
 
     if calibAbort then return nil end
     if safetyFail then
-        failScreen("  Aircraft left safe height bounds.\n  Check min/max height settings.")
+        failScreen("  Aircraft drifted more than 50 blocks from test height.\n  Try a higher hover output estimate.")
         return nil
     end
 
