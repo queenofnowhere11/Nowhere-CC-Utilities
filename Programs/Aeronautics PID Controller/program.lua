@@ -1,7 +1,7 @@
 -- Aeronautics PID Controller v1.0.0
 -- Height controller using CC: Sable and CC: Redstone Link Bridge
 
-local VERSION        = "1.0.0"
+local VERSION        = "1.0.2"
 local CONFIG_PATH    = fs.getDir(shell.getRunningProgram()) .. "/config.json"
 local DEFAULT_KP     = 2.0
 local DEFAULT_KI     = 0.05
@@ -222,24 +222,25 @@ end
 -- Startup checks
 --------------------------------------------------------------------------------
 
+term.clear()
+drawHeader()
+term.setCursorPos(1, 3)
+print("  Starting v" .. VERSION .. "...")
+
 if not sublevel then
-    term.clear()
-    term.setCursorPos(1, 1)
-    printError("sublevel API not available.")
-    print("Is this computer on a Sub-Level (physics object)?")
-    print("Press any key to exit.")
-    os.pullEvent("key")
+    term.setCursorPos(1, 5)
+    printError("  sublevel API not available.")
+    print("  Is this computer on a Sub-Level (physics object)?")
+    sleep(5)
     return
 end
 
 local bridge = peripheral.find("redstone_link_bridge")
 if not bridge then
-    term.clear()
-    term.setCursorPos(1, 1)
-    printError("No redstone_link_bridge peripheral found.")
-    print("Place a CC Redstone Link Bridge adjacent to this computer.")
-    print("Press any key to exit.")
-    os.pullEvent("key")
+    term.setCursorPos(1, 5)
+    printError("  No redstone_link_bridge peripheral found.")
+    print("  Place a CC Redstone Link Bridge adjacent to this computer.")
+    sleep(5)
     return
 end
 
