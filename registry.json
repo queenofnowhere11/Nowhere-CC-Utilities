@@ -1,0 +1,26 @@
+{
+  "startup_version": "1.0.0",
+  "nowhereos_version": "1.0.0",
+  "programs": [
+    {
+      "id": "elevator-controller",
+      "name": "Elevator Controller",
+      "description": "Controls elevator lift mechanisms",
+      "version": "1.0.0",
+      "main": "program.lua",
+      "files": [
+        { "src": "Programs/Elevator Controller/program.lua", "dest": "program.lua" }
+      ]
+    },
+    {
+      "id": "aeronautics-pid",
+      "name": "Aeronautics PID Controller",
+      "description": "PID flight controller for aeronautics",
+      "version": "1.0.0",
+      "main": "program.lua",
+      "files": [
+        { "src": "Programs/Aeronautics PID Controller/program.lua", "dest": "program.lua" }
+      ]
+    }
+  ]
+}
