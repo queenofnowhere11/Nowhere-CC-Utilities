@@ -1,10 +1,10 @@
--- NowhereOS v1.0.6
+-- NowhereOS v1.0.7
 -- Program browser, installer, and auto-updater for ComputerCraft.
 
 local GITHUB_RAW    = "https://raw.githubusercontent.com/queenofnowhere11/Nowhere-CC-Utilities/main/"
 local CONFIG_PATH   = "/.nowhere/config.json"
 local PROGRAMS_PATH = "/.nowhere/programs/"
-local VERSION       = "1.0.6"
+local VERSION       = "1.0.7"
 
 local W, H    = term.getSize()
 local isColor = term.isColour()
@@ -345,9 +345,12 @@ if not openMenu then
             if fs.exists(mainPath) then
                 term.clear()
                 resetColors()
-                local ok, err = pcall(shell.run, mainPath)
+                local ok, result = pcall(shell.run, mainPath)
                 if not ok then
-                    drawStatus("Program crashed:\n  " .. tostring(err) .. "\n\n  Press any key to return.")
+                    drawStatus("Program crashed:\n  " .. tostring(result) .. "\n\n  Press any key to return.")
+                    os.pullEvent("key")
+                elseif result == false then
+                    drawStatus("Program failed to load (syntax error or missing file).\n\n  Press any key to return.")
                     os.pullEvent("key")
                 end
             else

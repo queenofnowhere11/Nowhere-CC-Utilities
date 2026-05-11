@@ -1,7 +1,7 @@
 -- Aeronautics PID Controller v1.0.0
 -- Height controller using CC: Sable and CC: Redstone Link Bridge
 
-local VERSION        = "1.0.2"
+local VERSION        = "1.0.3"
 local CONFIG_PATH    = fs.getDir(shell.getRunningProgram()) .. "/config.json"
 local DEFAULT_KP     = 2.0
 local DEFAULT_KI     = 0.05
@@ -115,7 +115,7 @@ local function drawGraph(mon, cfg)
     mW, mH = mon.getSize()
 
     local isMonColor = mon.isColour()
-    mon.setBackgroundColour and mon.setBackgroundColour(colours.black)
+    mon.setBackgroundColour(colours.black)
     mon.clear()
 
     -- visible Y range: minHeight/maxHeight with 10% padding
