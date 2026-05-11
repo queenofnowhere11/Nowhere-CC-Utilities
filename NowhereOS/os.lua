@@ -1,10 +1,10 @@
--- NowhereOS v1.0.3
+-- NowhereOS v1.0.4
 -- Program browser, installer, and auto-updater for ComputerCraft.
 
 local GITHUB_RAW    = "https://raw.githubusercontent.com/queenofnowhere11/Nowhere-CC-Utilities/main/"
 local CONFIG_PATH   = "/.nowhere/config.json"
 local PROGRAMS_PATH = "/.nowhere/programs/"
-local VERSION       = "1.0.3"
+local VERSION       = "1.0.4"
 
 local W, H    = term.getSize()
 local isColor = term.isColour()
@@ -156,8 +156,13 @@ local function drawMenu(programs, config, selected, scroll)
                 resetColors()
             end
 
-            local marker = isDefault and "\7 " or "  "
-            local badge  = isDefault and " [DEFAULT]" or (isInst and " [installed]" or "")
+            local marker
+            if not isColor and isSel then
+                marker = "> "
+            else
+                marker = isDefault and "\7 " or "  "
+            end
+            local badge = isDefault and " [DEFAULT]" or (isInst and " [installed]" or "")
             writePadded(marker .. prog.name .. badge)
         else
             term.clearLine()
@@ -165,7 +170,7 @@ local function drawMenu(programs, config, selected, scroll)
     end
 
     resetColors()
-    drawFooter("[Up/Down] Select   [Enter] Install & Set Default   [Q] Quit")
+    drawFooter("[^/v] Select  [Enter] Set Default  [Q] Quit")
 end
 
 --------------------------------------------------------------------------------
