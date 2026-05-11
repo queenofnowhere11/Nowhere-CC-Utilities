@@ -1,7 +1,7 @@
--- Aeronautics PID Controller v1.0.6
+-- Aeronautics PID Controller v1.0.7
 -- Height controller using CC: Sable and CC: Redstone Link Bridge
 
-local VERSION        = "1.0.6"
+local VERSION        = "1.0.7"
 local CONFIG_PATH    = fs.getDir(shell.getRunningProgram()) .. "/config.json"
 local DEFAULT_KP     = 2.0
 local DEFAULT_KI     = 0.05
@@ -249,53 +249,151 @@ end
 --------------------------------------------------------------------------------
 
 local function runCalibration(cfg)
-    local RELAY_DELTA  = 4
-    local MAX_DURATION = 60
-    local MIN_CYCLES   = 3
-    local DEADBAND     = 0.5
+    local MAX_RELAY_DURATION = 60
+    local MIN_CYCLES         = 3
+    local DEADBAND           = 0.5
 
     local targetY = (cfg.minHeight + cfg.maxHeight) / 2
 
-    -- Phase A: Instructions + hover estimate
+    -- Phase A: Instructions
     term.clear()
     drawHeader("Auto-Calibration")
     term.setCursorPos(1, 3)
     resetColors()
     print("  Relay feedback test (Ziegler-Nichols method)")
     print("")
-    print("  The aircraft will oscillate for up to " .. MAX_DURATION .. "s,")
-    print("  then suggest PID gains from the response.")
+    print("  Phase 1: Sweeps output levels to find the")
+    print("           equilibrium bracket for target height.")
+    print("           The aircraft will move -- allow space.")
+    print("")
+    print("  Phase 2: Oscillates around target height for")
+    print("           up to " .. MAX_RELAY_DURATION .. " seconds to measure response.")
     print("")
     fg(colours.yellow)
     print("  Test height: " .. string.format("%.1f", targetY))
     resetColors()
     print("")
-    print("  Ensure the aircraft is clear of obstacles.")
-    print("")
-
-    term.write("  Approx. hover output (0-15) [8]: ")
-    local hoverInput = read()
-    local hoverEst   = tonumber(hoverInput) or 8
-    hoverEst = clamp(math.floor(hoverEst + 0.5), 0, 15)
-
-    local RELAY_HIGH = clamp(hoverEst + RELAY_DELTA, 0, 15)
-    local RELAY_LOW  = clamp(hoverEst - RELAY_DELTA, 0, 15)
-    local RELAY_AMP  = (RELAY_HIGH - RELAY_LOW) / 2
-
-    term.write("  Relay: " .. RELAY_LOW .. " / " .. RELAY_HIGH .. "   Press Enter to begin, Q to cancel. ")
+    drawFooter("[Enter] Begin  [Q] Cancel")
     while true do
         local _, key = os.pullEvent("key")
         if key == keys.enter then break
         elseif key == keys.q then return nil end
     end
 
-    -- Phase B: Relay test
+    -- Phase B: Bracket search
+    local relayLow   = nil
+    local relayHigh  = nil
+    local abortFlag  = false
+    local searchFail = false
+
+    local function drawBracketStatus(output, currentY, velocityY, stableCount)
+        term.clear()
+        drawHeader("Finding Hover Point...")
+        local function row(r, label, val)
+            term.setCursorPos(1, r)
+            fg(colours.lightGrey); term.write(label); resetColors()
+            term.write(tostring(val))
+        end
+        row(3, "Test output:    ", output .. "/15")
+        row(4, "Current height: ", string.format("%.2f", currentY))
+        row(5, "Velocity:       ", string.format("%.2f", velocityY) .. " b/s")
+        row(6, "Target height:  ", string.format("%.2f", targetY))
+        row(7, "Stable for:     ", string.format("%.0f/10 s", stableCount * LOOP_INTERVAL))
+        drawFooter("[Q] Abort")
+    end
+
+    local function bracketSearch()
+        local output    = 8
+        local prevEquil = nil
+        local prevOut   = nil
+        local searchDir = nil
+
+        while not abortFlag do
+            bridge.sendLinkSignal(cfg.outFreq1, cfg.outFreq2, output)
+
+            local stableCount = 0
+            while stableCount < 100 and not abortFlag do
+                local currentY  = sublevel.getLogicalPose().position.y
+                local velocityY = sublevel.getLinearVelocity().y
+                if math.abs(velocityY) < 0.5 then
+                    stableCount = stableCount + 1
+                else
+                    stableCount = 0
+                end
+                if currentY < cfg.minHeight - 10 or currentY > cfg.maxHeight + 10 then
+                    abortFlag = true; break
+                end
+                pushHistory(currentY, targetY)
+                drawBracketStatus(output, currentY, velocityY, stableCount)
+                drawGraph(peripheral.find("monitor"), cfg)
+                sleep(LOOP_INTERVAL)
+            end
+            if abortFlag then break end
+
+            local equilY = sublevel.getLogicalPose().position.y
+
+            if searchDir == nil then
+                searchDir = equilY > targetY and -1 or 1
+            end
+
+            if prevEquil ~= nil then
+                local crossed = (prevEquil < targetY and equilY >= targetY)
+                             or (prevEquil > targetY and equilY <= targetY)
+                if crossed then
+                    if prevEquil < targetY then
+                        relayLow = prevOut; relayHigh = output
+                    else
+                        relayLow = output;  relayHigh = prevOut
+                    end
+                    break
+                end
+            end
+
+            prevEquil = equilY
+            prevOut   = output
+            output    = output + searchDir
+
+            if output < 0 or output > 15 then
+                searchFail = true; break
+            end
+        end
+    end
+
+    local function abortListener1()
+        while not abortFlag do
+            local _, key = os.pullEvent("key")
+            if key == keys.q then abortFlag = true end
+        end
+    end
+
+    parallel.waitForAny(bracketSearch, abortListener1)
+    bridge.sendLinkSignal(cfg.outFreq1, cfg.outFreq2, 0)
+
+    local function failScreen(msg)
+        term.clear()
+        drawHeader("Calibration Failed")
+        term.setCursorPos(1, 3)
+        resetColors()
+        print(msg)
+        drawFooter("Press any key to return")
+        os.pullEvent("key")
+    end
+
+    if abortFlag  then return nil end
+    if searchFail then
+        failScreen("  Target height unreachable with available outputs.\n  Adjust min/max height range or move aircraft.")
+        return nil
+    end
+
+    local RELAY_AMP = (relayHigh - relayLow) / 2  -- 0.5 for adjacent integer outputs
+
+    -- Phase C: Relay test
     local startTime  = os.epoch("utc") / 1000
     local peaks      = {}
     local troughs    = {}
     local prevY      = nil
-    local direction  = 0   -- 0=unknown, 1=up, -1=down
-    local relayOut   = RELAY_HIGH
+    local direction  = 0
+    local relayOut   = relayHigh
     local calibAbort = false
     local safetyFail = false
 
@@ -304,13 +402,13 @@ local function runCalibration(cfg)
             local elapsed  = os.epoch("utc") / 1000 - startTime
             local currentY = sublevel.getLogicalPose().position.y
 
-            if currentY < targetY - 50 or currentY > targetY + 50 then
+            if currentY < targetY - 60 or currentY > targetY + 60 then
                 safetyFail = true; break
             end
 
             local velocityY  = sublevel.getLinearVelocity().y
             local predictedY = currentY + velocityY * 1.5
-            relayOut = (predictedY < targetY) and RELAY_HIGH or RELAY_LOW
+            relayOut = (predictedY < targetY) and relayHigh or relayLow
             bridge.sendLinkSignal(cfg.outFreq1, cfg.outFreq2, relayOut)
 
             if prevY ~= nil then
@@ -344,55 +442,45 @@ local function runCalibration(cfg)
             end
             row(3, "Current height: ", string.format("%.2f", currentY))
             row(4, "Target height:  ", string.format("%.2f", targetY))
-            row(5, "Relay output:   ", relayOut .. "/15")
+            row(5, "Relay output:   ", relayOut .. "/15  (" .. relayLow .. "/" .. relayHigh .. ")")
             row(6, "Cycles:         ", cycles .. "/" .. MIN_CYCLES)
-            row(7, "Time remaining: ", string.format("%.0f s", MAX_DURATION - elapsed))
+            row(7, "Time remaining: ", string.format("%.0f s", MAX_RELAY_DURATION - elapsed))
             drawFooter("[Q] Abort")
             drawGraph(peripheral.find("monitor"), cfg)
 
             if cycles >= MIN_CYCLES then break end
-            if elapsed >= MAX_DURATION then break end
+            if elapsed >= MAX_RELAY_DURATION then break end
             sleep(LOOP_INTERVAL)
         end
     end
 
-    local function abortListener()
+    local function abortListener2()
         while not calibAbort do
             local _, key = os.pullEvent("key")
             if key == keys.q then calibAbort = true end
         end
     end
 
-    parallel.waitForAny(relayLoop, abortListener)
+    parallel.waitForAny(relayLoop, abortListener2)
     bridge.sendLinkSignal(cfg.outFreq1, cfg.outFreq2, 0)
-
-    local function failScreen(msg)
-        term.clear()
-        drawHeader("Calibration Failed")
-        term.setCursorPos(1, 3)
-        resetColors()
-        print(msg)
-        drawFooter("Press any key to return")
-        os.pullEvent("key")
-    end
 
     if calibAbort then return nil end
     if safetyFail then
-        failScreen("  Aircraft drifted more than 50 blocks from test height.\n  Try a higher hover output estimate.")
+        failScreen("  Aircraft drifted more than 60 blocks from test height.\n  Try adjusting min/max height range.")
         return nil
     end
 
     local cycles = math.min(#peaks, #troughs)
     if cycles < MIN_CYCLES then
-        failScreen("  Not enough oscillation detected (" .. cycles .. "/" .. MIN_CYCLES .. " cycles).\n\n  - Check thruster connection to output frequency\n  - Try a wider min/max height range")
+        failScreen("  Not enough oscillation detected (" .. cycles .. "/" .. MIN_CYCLES .. " cycles).\n\n  - Check thruster connection to output frequency\n  - Try a different target height")
         return nil
     end
 
-    -- Phase C: Analysis
+    -- Phase D: Analysis
     local peakSum, troughSum = 0, 0
     for _, p in ipairs(peaks)   do peakSum   = peakSum   + p.height end
     for _, t in ipairs(troughs) do troughSum = troughSum + t.height end
-    local a  = (peakSum / #peaks - troughSum / #troughs) / 2
+    local a = (peakSum / #peaks - troughSum / #troughs) / 2
 
     local periodSum = 0
     for i = 2, #peaks do periodSum = periodSum + (peaks[i].time - peaks[i-1].time) end
@@ -415,7 +503,7 @@ local function runCalibration(cfg)
         o.kd = clamp(o.kd, 0, 100)
     end
 
-    -- Phase D: Results
+    -- Phase E: Results
     local sel = 1
     while true do
         term.clear()
@@ -423,9 +511,10 @@ local function runCalibration(cfg)
         term.setCursorPos(1, 3)
         resetColors()
         print(string.format("  Ku=%.3f  Tu=%.2fs  Amplitude=%.2f", Ku, Tu, a))
+        print(string.format("  Relay: %d / %d", relayLow, relayHigh))
         print("")
         for i, opt in ipairs(options) do
-            term.setCursorPos(1, 5 + (i - 1) * 2)
+            term.setCursorPos(1, 6 + (i - 1) * 2)
             local line = string.format("  [%d] %s  Kp=%.3f  Ki=%.4f  Kd=%.3f",
                 i, opt.label, opt.kp, opt.ki, opt.kd)
             if isColor and sel == i then
