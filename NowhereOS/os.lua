@@ -1,10 +1,10 @@
--- NowhereOS v1.0.2
+-- NowhereOS v1.0.3
 -- Program browser, installer, and auto-updater for ComputerCraft.
 
 local GITHUB_RAW    = "https://raw.githubusercontent.com/queenofnowhere11/Nowhere-CC-Utilities/main/"
 local CONFIG_PATH   = "/.nowhere/config.json"
 local PROGRAMS_PATH = "/.nowhere/programs/"
-local VERSION       = "1.0.2"
+local VERSION       = "1.0.3"
 
 local W, H    = term.getSize()
 local isColor = term.isColour()
@@ -14,6 +14,7 @@ local isColor = term.isColour()
 --------------------------------------------------------------------------------
 
 local function downloadFile(url, destPath)
+    url = url:gsub(" ", "%%20")
     local response = http.get(url)
     if not response then return false, "HTTP request failed" end
     local content = response.readAll()
