@@ -2,10 +2,11 @@
 -- Program browser, installer, and auto-updater for ComputerCraft.
 -- Receives registry JSON as its first argument (passed by startup.lua).
 
-local GITHUB_RAW    = "https://raw.githubusercontent.com/queenofnowhere11/Nowhere-CC-Utilities/main/"
-local CONFIG_PATH   = "/.nowhere/config.json"
-local PROGRAMS_PATH = "/.nowhere/programs/"
-local VERSION       = "1.0.0"
+local GITHUB_RAW     = "https://raw.githubusercontent.com/queenofnowhere11/Nowhere-CC-Utilities/main/"
+local CONFIG_PATH    = "/.nowhere/config.json"
+local REGISTRY_CACHE = "/.nowhere/registry.json"
+local PROGRAMS_PATH  = "/.nowhere/programs/"
+local VERSION        = "1.0.0"
 
 local W, H    = term.getSize()
 local isColor = term.isColour()
@@ -172,12 +173,16 @@ end
 -- Main
 --------------------------------------------------------------------------------
 
-local registryJson = ...
-local registry = textutils.unserialiseJSON(registryJson)
+local regFile = fs.open(REGISTRY_CACHE, "r")
+local registry
+if regFile then
+    registry = textutils.unserialiseJSON(regFile.readAll())
+    regFile.close()
+end
 
 if not registry then
     term.clear()
-    printError("NowhereOS: Could not parse registry data.")
+    printError("NowhereOS: Could not load registry.")
     print("Press any key to halt.")
     os.pullEvent("key")
     return
