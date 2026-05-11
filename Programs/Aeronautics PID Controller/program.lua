@@ -1,7 +1,7 @@
--- Aeronautics PID Controller v1.0.7
+-- Aeronautics PID Controller v1.0.8
 -- Height controller using CC: Sable and CC: Redstone Link Bridge
 
-local VERSION        = "1.0.7"
+local VERSION        = "1.0.8"
 local CONFIG_PATH    = fs.getDir(shell.getRunningProgram()) .. "/config.json"
 local DEFAULT_KP     = 2.0
 local DEFAULT_KI     = 0.05
@@ -37,6 +37,29 @@ end
 
 local function clamp(v, lo, hi)
     return math.max(lo, math.min(hi, v))
+end
+
+local function ffOutput(targetY, equilMap)
+    if not equilMap or #equilMap < 2 then return 0 end
+    table.sort(equilMap, function(a, b) return a.height < b.height end)
+    local n = #equilMap
+    if targetY <= equilMap[1].height then
+        local slope = (equilMap[2].output - equilMap[1].output) /
+                      (equilMap[2].height - equilMap[1].height)
+        return clamp(equilMap[1].output + slope * (targetY - equilMap[1].height), 0, 15)
+    end
+    if targetY >= equilMap[n].height then
+        local slope = (equilMap[n].output - equilMap[n-1].output) /
+                      (equilMap[n].height - equilMap[n-1].height)
+        return clamp(equilMap[n].output + slope * (targetY - equilMap[n].height), 0, 15)
+    end
+    for i = 1, n - 1 do
+        if equilMap[i].height <= targetY and equilMap[i+1].height >= targetY then
+            local t = (targetY - equilMap[i].height) / (equilMap[i+1].height - equilMap[i].height)
+            return equilMap[i].output + t * (equilMap[i+1].output - equilMap[i].output)
+        end
+    end
+    return 0
 end
 
 local function loadConfig()
@@ -92,7 +115,8 @@ local function drawStatus(currentY, targetY, rawSignal, output, err, cfg)
 
     row(3, "Current height: ", string.format("%.2f", currentY))
     row(4, "Target height:  ", string.format("%.2f  (signal: %d/15)", targetY, rawSignal))
-    row(5, "PID output:     ", output .. "/15")
+    local ff = ffOutput(targetY, cfg.equilMap)
+    row(5, "PID output:     ", string.format("%d/15  (ff:%.1f)", output, ff))
     row(6, "Error:          ", string.format("%.2f", err))
 
     term.setCursorPos(1, 8)
@@ -285,6 +309,7 @@ local function runCalibration(cfg)
     local relayHigh  = nil
     local abortFlag  = false
     local searchFail = false
+    local equilData  = {}
 
     local function drawBracketStatus(output, currentY, velocityY, stableCount)
         term.clear()
@@ -331,6 +356,7 @@ local function runCalibration(cfg)
             if abortFlag then break end
 
             local equilY = sublevel.getLogicalPose().position.y
+            equilData[#equilData + 1] = { output = output, height = equilY }
 
             if searchDir == nil then
                 searchDir = equilY > targetY and -1 or 1
@@ -368,6 +394,11 @@ local function runCalibration(cfg)
 
     parallel.waitForAny(bracketSearch, abortListener1)
     bridge.sendLinkSignal(cfg.outFreq1, cfg.outFreq2, 0)
+
+    if not abortFlag and not searchFail and #equilData >= 2 then
+        cfg.equilMap = equilData
+        saveConfig(cfg)
+    end
 
     local function failScreen(msg)
         term.clear()
@@ -580,7 +611,8 @@ local function controlLoop()
         local err       = targetY - currentY
         integral        = clamp(integral + err * LOOP_INTERVAL, -INTEGRAL_CLAMP, INTEGRAL_CLAMP)
         local velocityY = sublevel.getLinearVelocity().y
-        local outputF   = cfg.kp * err + cfg.ki * integral + cfg.kd * (-velocityY)
+        local ff        = ffOutput(targetY, cfg.equilMap)
+        local outputF   = ff + cfg.kp * err + cfg.ki * integral + cfg.kd * (-velocityY)
         local output    = clamp(math.floor(outputF + 0.5), 0, 15)
 
         bridge.sendLinkSignal(cfg.outFreq1, cfg.outFreq2, output)
