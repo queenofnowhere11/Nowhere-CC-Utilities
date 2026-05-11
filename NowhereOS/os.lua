@@ -1,12 +1,10 @@
--- NowhereOS v1.0.0
+-- NowhereOS v1.0.2
 -- Program browser, installer, and auto-updater for ComputerCraft.
--- Receives registry JSON as its first argument (passed by startup.lua).
 
-local GITHUB_RAW     = "https://raw.githubusercontent.com/queenofnowhere11/Nowhere-CC-Utilities/main/"
-local CONFIG_PATH    = "/.nowhere/config.json"
-local REGISTRY_CACHE = "/.nowhere/registry.json"
-local PROGRAMS_PATH  = "/.nowhere/programs/"
-local VERSION        = "1.0.1"
+local GITHUB_RAW    = "https://raw.githubusercontent.com/queenofnowhere11/Nowhere-CC-Utilities/main/"
+local CONFIG_PATH   = "/.nowhere/config.json"
+local PROGRAMS_PATH = "/.nowhere/programs/"
+local VERSION       = "1.0.2"
 
 local W, H    = term.getSize()
 local isColor = term.isColour()
@@ -173,16 +171,22 @@ end
 -- Main
 --------------------------------------------------------------------------------
 
-local regFile = fs.open(REGISTRY_CACHE, "r")
-local registry
-if regFile then
-    registry = textutils.unserialiseJSON(regFile.readAll())
-    regFile.close()
+term.clear()
+term.setCursorPos(1, 1)
+print("NowhereOS - Loading...")
+
+local regResp = http.get(GITHUB_RAW .. "registry.json")
+if not regResp then
+    printError("NowhereOS: Could not fetch registry. Check your connection.")
+    print("Press any key to halt.")
+    os.pullEvent("key")
+    return
 end
+local registry = textutils.unserialiseJSON(regResp.readAll())
+regResp.close()
 
 if not registry then
-    term.clear()
-    printError("NowhereOS: Could not load registry.")
+    printError("NowhereOS: Could not parse registry.")
     print("Press any key to halt.")
     os.pullEvent("key")
     return

@@ -2,10 +2,9 @@
 -- Lives at /startup.lua on the CC computer.
 -- Fetches registry.json, self-updates if needed, then runs NowhereOS.
 
-local GITHUB_RAW     = "https://raw.githubusercontent.com/queenofnowhere11/Nowhere-CC-Utilities/main/"
-local CONFIG_PATH    = "/.nowhere/config.json"
-local OS_PATH        = "/.nowhere/os.lua"
-local REGISTRY_CACHE = "/.nowhere/registry.json"
+local GITHUB_RAW  = "https://raw.githubusercontent.com/queenofnowhere11/Nowhere-CC-Utilities/main/"
+local CONFIG_PATH = "/.nowhere/config.json"
+local OS_PATH     = "/.nowhere/os.lua"
 
 local function downloadFile(url, path)
     local response = http.get(url)
@@ -89,10 +88,5 @@ if needsOsUpdate or not fs.exists(OS_PATH) then
         printError("Running cached version.")
     end
 end
-
--- Cache registry to disk so os.lua can read it without re-downloading
-local cacheFile = fs.open(REGISTRY_CACHE, "w")
-cacheFile.write(registryContent)
-cacheFile.close()
 
 shell.run(OS_PATH)
