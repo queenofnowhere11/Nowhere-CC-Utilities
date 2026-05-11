@@ -1,7 +1,7 @@
 -- Aeronautics PID Controller v1.0.0
 -- Height controller using CC: Sable and CC: Redstone Link Bridge
 
-local VERSION        = "1.0.3"
+local VERSION        = "1.0.4"
 local CONFIG_PATH    = fs.getDir(shell.getRunningProgram()) .. "/config.json"
 local DEFAULT_KP     = 2.0
 local DEFAULT_KI     = 0.05
@@ -100,7 +100,7 @@ local function drawStatus(currentY, targetY, rawSignal, output, err, cfg)
     term.write(string.format("Kp=%.2f  Ki=%.3f  Kd=%.2f", cfg.kp, cfg.ki, cfg.kd))
     resetColors()
 
-    drawFooter("[Q] Quit   [R] Reconfigure")
+    drawFooter("[Q] Quit  [R] Config  [C] Calibrate")
 end
 
 --------------------------------------------------------------------------------
@@ -245,6 +245,206 @@ if not bridge then
 end
 
 --------------------------------------------------------------------------------
+-- Auto-calibration (relay feedback / Ziegler-Nichols)
+--------------------------------------------------------------------------------
+
+local function runCalibration(cfg)
+    local RELAY_HIGH   = 15
+    local RELAY_LOW    = 0
+    local RELAY_AMP    = 7.5
+    local MAX_DURATION = 60
+    local MIN_CYCLES   = 3
+    local DEADBAND     = 0.5
+
+    local targetY = (cfg.minHeight + cfg.maxHeight) / 2
+
+    -- Phase A: Instructions
+    term.clear()
+    drawHeader("Auto-Calibration")
+    term.setCursorPos(1, 3)
+    resetColors()
+    print("  Relay feedback test (Ziegler-Nichols method)")
+    print("")
+    print("  The aircraft will oscillate for up to " .. MAX_DURATION .. "s,")
+    print("  then suggest PID gains from the response.")
+    print("")
+    fg(colours.yellow)
+    print("  Test height: " .. string.format("%.1f", targetY))
+    resetColors()
+    print("")
+    print("  Ensure the aircraft is clear of obstacles.")
+    drawFooter("[Enter] Begin   [Q] Cancel")
+
+    while true do
+        local _, key = os.pullEvent("key")
+        if key == keys.enter then break
+        elseif key == keys.q then return nil end
+    end
+
+    -- Phase B: Relay test
+    local startTime  = os.epoch("utc") / 1000
+    local peaks      = {}
+    local troughs    = {}
+    local prevY      = nil
+    local direction  = 0   -- 0=unknown, 1=up, -1=down
+    local relayOut   = RELAY_HIGH
+    local calibAbort = false
+    local safetyFail = false
+
+    local function relayLoop()
+        while true do
+            local elapsed  = os.epoch("utc") / 1000 - startTime
+            local currentY = sublevel.getLogicalPose().position.y
+
+            if currentY < cfg.minHeight - 10 or currentY > cfg.maxHeight + 10 then
+                safetyFail = true; break
+            end
+
+            relayOut = (currentY < targetY) and RELAY_HIGH or RELAY_LOW
+            bridge.sendLinkSignal(cfg.outFreq1, cfg.outFreq2, relayOut)
+
+            if prevY ~= nil then
+                if direction == 0 then
+                    if     currentY > prevY + 0.01 then direction =  1
+                    elseif currentY < prevY - 0.01 then direction = -1
+                    end
+                elseif direction == 1 and currentY < prevY - 0.01 then
+                    if prevY > targetY + DEADBAND then
+                        peaks[#peaks + 1] = { height = prevY, time = elapsed }
+                    end
+                    direction = -1
+                elseif direction == -1 and currentY > prevY + 0.01 then
+                    if prevY < targetY - DEADBAND then
+                        troughs[#troughs + 1] = { height = prevY, time = elapsed }
+                    end
+                    direction = 1
+                end
+            end
+            prevY = currentY
+
+            pushHistory(currentY, targetY)
+
+            local cycles = math.min(#peaks, #troughs)
+            term.clear()
+            drawHeader("Calibrating...")
+            local function row(r, label, val)
+                term.setCursorPos(1, r)
+                fg(colours.lightGrey); term.write(label); resetColors()
+                term.write(tostring(val))
+            end
+            row(3, "Current height: ", string.format("%.2f", currentY))
+            row(4, "Target height:  ", string.format("%.2f", targetY))
+            row(5, "Relay output:   ", relayOut .. "/15")
+            row(6, "Cycles:         ", cycles .. "/" .. MIN_CYCLES)
+            row(7, "Time remaining: ", string.format("%.0f s", MAX_DURATION - elapsed))
+            drawFooter("[Q] Abort")
+            drawGraph(peripheral.find("monitor"), cfg)
+
+            if cycles >= MIN_CYCLES then break end
+            if elapsed >= MAX_DURATION then break end
+            sleep(LOOP_INTERVAL)
+        end
+    end
+
+    local function abortListener()
+        while not calibAbort do
+            local _, key = os.pullEvent("key")
+            if key == keys.q then calibAbort = true end
+        end
+    end
+
+    parallel.waitForAny(relayLoop, abortListener)
+    bridge.sendLinkSignal(cfg.outFreq1, cfg.outFreq2, 0)
+
+    local function failScreen(msg)
+        term.clear()
+        drawHeader("Calibration Failed")
+        term.setCursorPos(1, 3)
+        resetColors()
+        print(msg)
+        drawFooter("Press any key to return")
+        os.pullEvent("key")
+    end
+
+    if calibAbort then return nil end
+    if safetyFail then
+        failScreen("  Aircraft left safe height bounds.\n  Check min/max height settings.")
+        return nil
+    end
+
+    local cycles = math.min(#peaks, #troughs)
+    if cycles < MIN_CYCLES then
+        failScreen("  Not enough oscillation detected (" .. cycles .. "/" .. MIN_CYCLES .. " cycles).\n\n  - Check thruster connection to output frequency\n  - Try a wider min/max height range")
+        return nil
+    end
+
+    -- Phase C: Analysis
+    local peakSum, troughSum = 0, 0
+    for _, p in ipairs(peaks)   do peakSum   = peakSum   + p.height end
+    for _, t in ipairs(troughs) do troughSum = troughSum + t.height end
+    local a  = (peakSum / #peaks - troughSum / #troughs) / 2
+
+    local periodSum = 0
+    for i = 2, #peaks do periodSum = periodSum + (peaks[i].time - peaks[i-1].time) end
+    local Tu = periodSum / (#peaks - 1)
+
+    if a < 0.1 then
+        failScreen("  Oscillation amplitude too small (a=" .. string.format("%.3f", a) .. ").\n  System may not be responding to relay control.")
+        return nil
+    end
+
+    local Ku = (4 / math.pi) * RELAY_AMP / a
+
+    local options = {
+        { label = "Classic     ", kp = 0.6  * Ku, ki = 1.2  * Ku / Tu, kd = 0.075 * Ku * Tu },
+        { label = "Conservative", kp = 0.33 * Ku, ki = 0.66 * Ku / Tu, kd = 0.11  * Ku * Tu },
+    }
+    for _, o in ipairs(options) do
+        o.kp = clamp(o.kp, 0, 100)
+        o.ki = clamp(o.ki, 0, 100)
+        o.kd = clamp(o.kd, 0, 100)
+    end
+
+    -- Phase D: Results
+    local sel = 1
+    while true do
+        term.clear()
+        drawHeader("Calibration Results")
+        term.setCursorPos(1, 3)
+        resetColors()
+        print(string.format("  Ku=%.3f  Tu=%.2fs  Amplitude=%.2f", Ku, Tu, a))
+        print("")
+        for i, opt in ipairs(options) do
+            term.setCursorPos(1, 5 + (i - 1) * 2)
+            local line = string.format("  [%d] %s  Kp=%.3f  Ki=%.4f  Kd=%.3f",
+                i, opt.label, opt.kp, opt.ki, opt.kd)
+            if isColor and sel == i then
+                fg(colours.black); bg(colours.white)
+                writePadded(line)
+            else
+                term.write((not isColor and sel == i) and (">" .. line:sub(2)) or line)
+            end
+            resetColors()
+        end
+        drawFooter("[1/2] Select  [Enter] Apply  [Q] Discard")
+
+        local _, key = os.pullEvent("key")
+        if     key == keys.one                     then sel = 1
+        elseif key == keys.two                     then sel = 2
+        elseif key == keys.up or key == keys.down  then sel = sel == 1 and 2 or 1
+        elseif key == keys.enter then
+            cfg.kp = options[sel].kp
+            cfg.ki = options[sel].ki
+            cfg.kd = options[sel].kd
+            saveConfig(cfg)
+            return cfg
+        elseif key == keys.q then
+            return nil
+        end
+    end
+end
+
+--------------------------------------------------------------------------------
 -- Main
 --------------------------------------------------------------------------------
 
@@ -300,6 +500,8 @@ local function keyListener()
             action = "quit"
         elseif key == keys.r then
             action = "reconfigure"
+        elseif key == keys.c then
+            action = "calibrate"
         end
     end
 end
@@ -317,6 +519,11 @@ while true do
         break
     elseif action == "reconfigure" then
         cfg = runSetup(cfg)
+        history = {}
+        resetPID()
+    elseif action == "calibrate" then
+        local newCfg = runCalibration(cfg)
+        if newCfg then cfg = newCfg end
         history = {}
         resetPID()
     end
