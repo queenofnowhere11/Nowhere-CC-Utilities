@@ -1,10 +1,10 @@
--- NowhereOS v1.0.5
+-- NowhereOS v1.0.6
 -- Program browser, installer, and auto-updater for ComputerCraft.
 
 local GITHUB_RAW    = "https://raw.githubusercontent.com/queenofnowhere11/Nowhere-CC-Utilities/main/"
 local CONFIG_PATH   = "/.nowhere/config.json"
 local PROGRAMS_PATH = "/.nowhere/programs/"
-local VERSION       = "1.0.5"
+local VERSION       = "1.0.6"
 
 local W, H    = term.getSize()
 local isColor = term.isColour()
@@ -170,7 +170,98 @@ local function drawMenu(programs, config, selected, scroll)
     end
 
     resetColors()
-    drawFooter("[^/v] Select  [Enter] Set Default  [Q] Quit")
+    drawFooter("[^/v] Select [Enter] Default [U] Update [Q] Quit")
+end
+
+--------------------------------------------------------------------------------
+-- Update checker
+--------------------------------------------------------------------------------
+
+local function checkForUpdates(config, currentRegistry)
+    drawStatus("Checking for updates...")
+
+    local resp = http.get(GITHUB_RAW .. "registry.json")
+    if not resp then
+        drawStatus("Could not reach server.\n\n  Press any key to return.")
+        os.pullEvent("key")
+        return currentRegistry
+    end
+    local newRegistry = textutils.unserialiseJSON(resp.readAll())
+    resp.close()
+    if not newRegistry then
+        drawStatus("Could not parse registry.\n\n  Press any key to return.")
+        os.pullEvent("key")
+        return currentRegistry
+    end
+
+    local lines       = {}
+    local needsReboot = false
+
+    local function addLine(text) lines[#lines + 1] = text end
+
+    -- Boot shim
+    if (config.startup_version or "0") ~= newRegistry.startup_version then
+        if downloadFile(GITHUB_RAW .. "NowhereOS/startup.lua", "/startup.lua") then
+            config.startup_version = newRegistry.startup_version
+            addLine("Boot shim: updated to v" .. newRegistry.startup_version)
+            needsReboot = true
+        else
+            addLine("Boot shim: update FAILED")
+        end
+    else
+        addLine("Boot shim: up to date (v" .. (config.startup_version or "?") .. ")")
+    end
+
+    -- NowhereOS core
+    if (config.nowhereos_version or "0") ~= newRegistry.nowhereos_version then
+        if downloadFile(GITHUB_RAW .. "NowhereOS/os.lua", "/.nowhere/os.lua") then
+            config.nowhereos_version = newRegistry.nowhereos_version
+            addLine("NowhereOS: updated to v" .. newRegistry.nowhereos_version)
+            needsReboot = true
+        else
+            addLine("NowhereOS: update FAILED")
+        end
+    else
+        addLine("NowhereOS: up to date (v" .. (config.nowhereos_version or "?") .. ")")
+    end
+
+    -- Installed programs
+    for _, prog in ipairs(newRegistry.programs or {}) do
+        local inst = config.installed and config.installed[prog.id]
+        if inst then
+            if inst.version ~= prog.version then
+                local ok, err = installProgram(prog, config)
+                if ok then
+                    addLine(prog.name .. ": updated to v" .. prog.version)
+                else
+                    addLine(prog.name .. ": update FAILED (" .. tostring(err) .. ")")
+                end
+            else
+                addLine(prog.name .. ": up to date (v" .. inst.version .. ")")
+            end
+        end
+    end
+
+    saveConfig(config)
+
+    -- Results screen
+    term.clear()
+    drawHeader()
+    term.setCursorPos(1, 3)
+    resetColors()
+    for _, line in ipairs(lines) do
+        print("  " .. line)
+    end
+    if needsReboot then
+        print("")
+        fg(colours.yellow)
+        print("  OS updated — reboot to apply.")
+        resetColors()
+    end
+    drawFooter("Press any key to return")
+    os.pullEvent("key")
+
+    return newRegistry
 end
 
 --------------------------------------------------------------------------------
@@ -309,6 +400,10 @@ while true do
             drawStatus("Install failed: " .. tostring(err) .. "\n\n  Press any key to return.")
             os.pullEvent("key")
         end
+
+    elseif key == keys.u then
+        registry = checkForUpdates(config, registry)
+        programs = registry.programs or {}
 
     elseif key == keys.q then
         break
