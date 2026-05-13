@@ -1,7 +1,7 @@
--- Aeronautics PID Controller v2.0.1
+-- Aeronautics PID Controller v2.0.2
 -- Height controller using Create: Avionics and CC: Redstone Link Bridge
 
-local VERSION        = "2.0.1"
+local VERSION        = "2.0.2"
 local CONFIG_PATH    = fs.getDir(shell.getRunningProgram()) .. "/config.json"
 local DEFAULT_KP     = 2.0
 local DEFAULT_KI     = 0.05
@@ -280,8 +280,8 @@ end
 --------------------------------------------------------------------------------
 
 local function runCalibration(cfg)
-    local MAX_RELAY_DURATION = 60
-    local MIN_CYCLES         = 3
+    local MAX_RELAY_DURATION = 300
+    local MIN_CYCLES         = 5
     local DEADBAND           = 0.5
 
     local targetY = (cfg.minHeight + cfg.maxHeight) / 2
