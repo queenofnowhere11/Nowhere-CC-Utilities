@@ -1,7 +1,7 @@
--- Aeronautics PID Controller v1.0.8
--- Height controller using CC: Sable and CC: Redstone Link Bridge
+-- Aeronautics PID Controller v2.0.0
+-- Height controller using Create: Avionics and CC: Redstone Link Bridge
 
-local VERSION        = "1.0.8"
+local VERSION        = "2.0.0"
 local CONFIG_PATH    = fs.getDir(shell.getRunningProgram()) .. "/config.json"
 local DEFAULT_KP     = 2.0
 local DEFAULT_KI     = 0.05
@@ -121,7 +121,8 @@ local function drawStatus(currentY, targetY, rawSignal, output, err, cfg)
 
     term.setCursorPos(1, 8)
     fg(colours.lightGrey)
-    term.write(string.format("Kp=%.2f  Ki=%.3f  Kd=%.2f", cfg.kp, cfg.ki, cfg.kd))
+    local invTag = cfg.invertInput and "  [INV]" or ""
+    term.write(string.format("Kp=%.2f  Ki=%.3f  Kd=%.2f%s", cfg.kp, cfg.ki, cfg.kd, invTag))
     resetColors()
 
     drawFooter("[Q] Quit  [R] Config  [C] Calibrate")
@@ -233,6 +234,11 @@ local function runSetup(existing)
     cfg.outFreq2 = prompt("Output freq2 (item ID)", e.outFreq2 or "")
 
     print("")
+    print("-- Input Direction --")
+    local inv = prompt("Invert? 15=MinHeight (y/n)", e.invertInput and "y" or "n")
+    cfg.invertInput = (inv == "y" or inv == true)
+
+    print("")
     print("-- PID Gains --")
     cfg.kp = prompt("Kp", e.kp or DEFAULT_KP)
     cfg.ki = prompt("Ki", e.ki or DEFAULT_KI)
@@ -251,10 +257,11 @@ drawHeader()
 term.setCursorPos(1, 3)
 print("  Starting v" .. VERSION .. "...")
 
-if not sublevel then
+local altSensor = peripheral.find("altitude_sensor")
+if not altSensor then
     term.setCursorPos(1, 5)
-    printError("  sublevel API not available.")
-    print("  Is this computer on a Sub-Level (physics object)?")
+    printError("  No altitude_sensor peripheral found.")
+    print("  Place a Create: Avionics Altitude Sensor adjacent to this computer.")
     sleep(5)
     return
 end
@@ -338,8 +345,8 @@ local function runCalibration(cfg)
 
             local stableCount = 0
             while stableCount < 100 and not abortFlag do
-                local currentY  = sublevel.getLogicalPose().position.y
-                local velocityY = sublevel.getLinearVelocity().y
+                local currentY  = altSensor.getHeight()
+                local velocityY = altSensor.getVerticalSpeed()
                 if math.abs(velocityY) < 0.5 then
                     stableCount = stableCount + 1
                 else
@@ -355,7 +362,7 @@ local function runCalibration(cfg)
             end
             if abortFlag then break end
 
-            local equilY = sublevel.getLogicalPose().position.y
+            local equilY = altSensor.getHeight()
             equilData[#equilData + 1] = { output = output, height = equilY }
 
             if searchDir == nil then
@@ -431,13 +438,13 @@ local function runCalibration(cfg)
     local function relayLoop()
         while true do
             local elapsed  = os.epoch("utc") / 1000 - startTime
-            local currentY = sublevel.getLogicalPose().position.y
+            local currentY = altSensor.getHeight()
 
             if currentY < targetY - 60 or currentY > targetY + 60 then
                 safetyFail = true; break
             end
 
-            local velocityY  = sublevel.getLinearVelocity().y
+            local velocityY  = altSensor.getVerticalSpeed()
             local predictedY = currentY + velocityY * 1.5
             relayOut = (predictedY < targetY) and relayHigh or relayLow
             bridge.sendLinkSignal(cfg.outFreq1, cfg.outFreq2, relayOut)
@@ -601,7 +608,8 @@ local function controlLoop()
         local currentY = pose.position.y
 
         local rawSignal = bridge.getLinkSignal(cfg.inFreq1, cfg.inFreq2)
-        local targetY   = cfg.minHeight + (rawSignal / 15) * (cfg.maxHeight - cfg.minHeight)
+        local frac      = cfg.invertInput and (1 - rawSignal / 15) or (rawSignal / 15)
+        local targetY   = cfg.minHeight + frac * (cfg.maxHeight - cfg.minHeight)
 
         if lastTarget and math.abs(targetY - lastTarget) > 5 then
             integral = 0
@@ -610,7 +618,7 @@ local function controlLoop()
 
         local err       = targetY - currentY
         integral        = clamp(integral + err * LOOP_INTERVAL, -INTEGRAL_CLAMP, INTEGRAL_CLAMP)
-        local velocityY = sublevel.getLinearVelocity().y
+        local velocityY = altSensor.getVerticalSpeed()
         local ff        = ffOutput(targetY, cfg.equilMap)
         local outputF   = ff + cfg.kp * err + cfg.ki * integral + cfg.kd * (-velocityY)
         local output    = clamp(math.floor(outputF + 0.5), 0, 15)
