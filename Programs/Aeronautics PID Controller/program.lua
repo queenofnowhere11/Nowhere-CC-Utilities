@@ -1,7 +1,7 @@
--- Aeronautics PID Controller v2.0.0
+-- Aeronautics PID Controller v2.0.1
 -- Height controller using Create: Avionics and CC: Redstone Link Bridge
 
-local VERSION        = "2.0.0"
+local VERSION        = "2.0.1"
 local CONFIG_PATH    = fs.getDir(shell.getRunningProgram()) .. "/config.json"
 local DEFAULT_KP     = 2.0
 local DEFAULT_KI     = 0.05
@@ -444,9 +444,7 @@ local function runCalibration(cfg)
                 safetyFail = true; break
             end
 
-            local velocityY  = altSensor.getVerticalSpeed()
-            local predictedY = currentY + velocityY * 1.5
-            relayOut = (predictedY < targetY) and relayHigh or relayLow
+            relayOut = (currentY < targetY) and relayHigh or relayLow
             bridge.sendLinkSignal(cfg.outFreq1, cfg.outFreq2, relayOut)
 
             if prevY ~= nil then
