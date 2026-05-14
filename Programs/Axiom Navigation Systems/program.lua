@@ -1,0 +1,511 @@
+-- Axiom Navigation Systems v1.0.0
+-- Navigation control system for the AXIOM airship
+
+local VERSION     = "1.0.0"
+local CONFIG_PATH = "ans_config.json"
+local PROTOCOL    = "axiom_nav"
+
+-- Redstone Link Bridge frequencies
+local THROTTLE_F1 = "everycomp:tf/biomeswevegone/hollow_ebony_log"
+local THROTTLE_F2 = "simulated:throttle_lever"
+local REVERSE_F1  = "everycomp:tf/biomeswevegone/hollow_ebony_log"
+local REVERSE_F2  = "minecraft:lever"
+local FUEL_F1     = "everycomp:tf/biomeswevegone/hollow_ebony_log"
+local FUEL_F2     = "create_connected:fluid_vessel"
+
+--------------------------------------------------------------------------------
+-- Config
+--------------------------------------------------------------------------------
+
+local function loadConfig()
+    if not fs.exists(CONFIG_PATH) then return {} end
+    local f = fs.open(CONFIG_PATH, "r")
+    local raw = f.readAll()
+    f.close()
+    return textutils.unserialiseJSON(raw) or {}
+end
+
+local function saveConfig(cfg)
+    local f = fs.open(CONFIG_PATH, "w")
+    f.write(textutils.serialiseJSON(cfg))
+    f.close()
+end
+
+--------------------------------------------------------------------------------
+-- Vessel check
+--------------------------------------------------------------------------------
+
+local assembler = peripheral.find("physics_assembler")
+if not assembler or assembler.getSubLevelName() ~= "AXIOM" then
+    local name = assembler and tostring(assembler.getSubLevelName()) or "none"
+    print("ERROR: This program only runs on the AXIOM.")
+    print("       Vessel name: " .. name)
+    sleep(5)
+    return
+end
+
+--------------------------------------------------------------------------------
+-- Display helpers
+--------------------------------------------------------------------------------
+
+local W, H = term.getSize()
+
+local function cls()
+    term.clear()
+    term.setCursorPos(1, 1)
+end
+
+local function header(title)
+    term.setCursorPos(1, 1)
+    if term.isColour() then
+        term.setTextColour(colours.black)
+        term.setBackgroundColour(colours.cyan)
+    end
+    local line = " ANS v" .. VERSION .. " | " .. title
+    term.write(line .. string.rep(" ", math.max(0, W - #line)))
+    if term.isColour() then
+        term.setTextColour(colours.white)
+        term.setBackgroundColour(colours.black)
+    end
+end
+
+local function statusLine(row, text)
+    term.setCursorPos(1, row)
+    term.clearLine()
+    term.write(text)
+end
+
+--------------------------------------------------------------------------------
+-- Wireless modem
+--------------------------------------------------------------------------------
+
+local function openWirelessModem()
+    for _, name in ipairs(peripheral.getNames()) do
+        if peripheral.getType(name) == "modem" then
+            local m = peripheral.wrap(name)
+            if m and m.isWireless() then
+                rednet.open(name)
+                return true
+            end
+        end
+    end
+    return false
+end
+
+--------------------------------------------------------------------------------
+-- Module selector
+--------------------------------------------------------------------------------
+
+local MODULES = {
+    { id = "sensor",  label = "Sensor",  desc = "Reads sensors, broadcasts to network"         },
+    { id = "readout", label = "Readout", desc = "Displays flight data on cockpit monitors"      },
+    { id = "pilot",   label = "Pilot",   desc = "Reads steering wheel, broadcasts turn values"  },
+    { id = "engine",  label = "Engine",  desc = "Controls left and right engine outputs"        },
+}
+
+local function getModule(cfg)
+    while true do
+        if not cfg.module then
+            cls()
+            header("Module Selection")
+            term.setCursorPos(1, 3)
+            print("  Select a module for this computer:")
+            print("")
+            for i, m in ipairs(MODULES) do
+                print(string.format("  [%d] %-8s - %s", i, m.label, m.desc))
+            end
+            print("")
+            term.write("  Module (1-" .. #MODULES .. "): ")
+            local n = tonumber(read())
+            if n and MODULES[n] then
+                cfg.module = MODULES[n].id
+                saveConfig(cfg)
+            end
+        else
+            local reselect = false
+
+            local function countDown()
+                for i = 3, 1, -1 do
+                    cls()
+                    header("Starting...")
+                    term.setCursorPos(1, 3)
+                    print("  Module: " .. cfg.module)
+                    print("")
+                    print("  Starting in " .. i .. " second" .. (i ~= 1 and "s" or "") .. "...")
+                    print("  Press any key to change module.")
+                    sleep(1)
+                end
+            end
+
+            local function keyWatch()
+                os.pullEvent("key")
+                reselect = true
+            end
+
+            parallel.waitForAny(countDown, keyWatch)
+
+            if reselect then
+                cfg.module = nil
+                saveConfig(cfg)
+            else
+                return cfg.module
+            end
+        end
+    end
+end
+
+--------------------------------------------------------------------------------
+-- Module: Sensor
+--------------------------------------------------------------------------------
+
+local function runSensor()
+    local bridge    = peripheral.find("redstone_link_bridge")
+    local altSensor = peripheral.find("altitude_sensor")
+    local velSensor = peripheral.find("velocity_sensor")
+    local navTable  = peripheral.find("navigation_table")
+
+    local missing = {}
+    if not bridge    then missing[#missing+1] = "redstone_link_bridge" end
+    if not altSensor then missing[#missing+1] = "altitude_sensor"      end
+    if not velSensor then missing[#missing+1] = "velocity_sensor"      end
+    if not navTable  then missing[#missing+1] = "navigation_table"     end
+
+    if #missing > 0 then
+        cls()
+        header("Sensor Module - ERROR")
+        term.setCursorPos(1, 3)
+        print("  Missing peripherals:")
+        for _, name in ipairs(missing) do
+            printError("    - " .. name)
+        end
+        sleep(5)
+        return
+    end
+
+    cls()
+    header("Sensor Module")
+
+    while true do
+        local throttle  = bridge.getLinkSignal(THROTTLE_F1, THROTTLE_F2)
+        local reverse   = bridge.getLinkSignal(REVERSE_F1,  REVERSE_F2) == 15
+        local altitude  = altSensor.getHeight()
+        local velocity  = velSensor.getVelocity()
+        local autopilot = navTable.hasTarget()
+        local heading   = navTable.getHeading()
+        local distance  = autopilot and navTable.getDistanceToTarget() or nil
+        local fuel      = bridge.getLinkSignal(FUEL_F1, FUEL_F2)
+
+        rednet.broadcast({
+            type      = "sensor_data",
+            throttle  = throttle,
+            reverse   = reverse,
+            altitude  = altitude,
+            velocity  = velocity,
+            autopilot = autopilot,
+            heading   = heading,
+            distance  = distance,
+            fuel      = fuel,
+        }, PROTOCOL)
+
+        statusLine(3, string.format("  Altitude : %.1f m", altitude))
+        statusLine(4, string.format("  Velocity : %.2f m/s", velocity))
+        statusLine(5, string.format("  Throttle : %d/15%s", throttle, reverse and "  [REVERSE]" or ""))
+        statusLine(6, string.format("  Autopilot: %s%s", autopilot and "ON" or "OFF",
+            distance and string.format("  (%.0f m)", distance) or ""))
+        statusLine(7, string.format("  Heading  : %.1f deg", heading))
+        statusLine(8, string.format("  Fuel     : %d/15", fuel))
+
+        sleep(0.05)
+    end
+end
+
+--------------------------------------------------------------------------------
+-- Module: Readout
+--------------------------------------------------------------------------------
+
+local function runReadout()
+    local leftMon  = peripheral.wrap("left")
+    local rightMon = peripheral.wrap("right")
+
+    if not leftMon or not rightMon then
+        cls()
+        header("Readout Module - ERROR")
+        term.setCursorPos(1, 3)
+        printError("  Monitors not found.")
+        print("  Connect 2x1 advanced monitors to the left and right sides.")
+        sleep(5)
+        return
+    end
+
+    leftMon.setTextScale(0.5)
+    rightMon.setTextScale(0.5)
+
+    local function mwrite(mon, x, y, text, col)
+        mon.setCursorPos(x, y)
+        if col and mon.isColour() then mon.setTextColour(col) end
+        mon.write(text)
+        if mon.isColour() then mon.setTextColour(colours.white) end
+    end
+
+    local function fuelBar(val, width)
+        local filled = math.floor(val / 15 * width + 0.5)
+        return string.rep("=", filled) .. string.rep("-", width - filled)
+    end
+
+    local function redraw(d)
+        -- Left monitor: Altitude and Velocity
+        if leftMon.isColour() then leftMon.setBackgroundColour(colours.black) end
+        leftMon.clear()
+        mwrite(leftMon, 2, 1, "FLIGHT DATA", colours.cyan)
+        mwrite(leftMon, 2, 3, string.format("ALTITUDE  %.1f m",    d.altitude or 0))
+        mwrite(leftMon, 2, 5, string.format("VELOCITY  %.2f m/s",  d.velocity or 0))
+
+        -- Right monitor: Autopilot, Fuel, Throttle
+        if rightMon.isColour() then rightMon.setBackgroundColour(colours.black) end
+        rightMon.clear()
+        mwrite(rightMon, 2, 1, "STATUS", colours.cyan)
+
+        if d.autopilot then
+            mwrite(rightMon, 2, 3,
+                string.format("AP  ON   %.0f m", d.distance or 0), colours.lime)
+        else
+            mwrite(rightMon, 2, 3, "AP  OFF", colours.red)
+        end
+
+        local fuelVal = d.fuel or 0
+        local fuelCol = colours.white
+        if     fuelVal <= 3 then fuelCol = colours.red
+        elseif fuelVal <= 7 then fuelCol = colours.yellow end
+        mwrite(rightMon, 2, 5,
+            string.format("FUEL [%s] %d/15", fuelBar(fuelVal, 9), fuelVal), fuelCol)
+
+        mwrite(rightMon, 2, 7,
+            string.format("THR  %d/15%s", d.throttle or 0, d.reverse and "  REV" or ""))
+    end
+
+    cls()
+    header("Readout Module")
+    term.setCursorPos(1, 3)
+    print("  Waiting for sensor data...")
+
+    local lastData = {}
+    while true do
+        local _, msg = rednet.receive(PROTOCOL, 1)
+        if msg and msg.type == "sensor_data" then
+            lastData = msg
+            redraw(lastData)
+        end
+    end
+end
+
+--------------------------------------------------------------------------------
+-- Module: Pilot
+--------------------------------------------------------------------------------
+
+local function runPilot()
+    local wheel = peripheral.find("steering_wheel")
+    if not wheel then
+        cls()
+        header("Pilot Module - ERROR")
+        term.setCursorPos(1, 3)
+        printError("  No steering_wheel peripheral found.")
+        sleep(5)
+        return
+    end
+
+    cls()
+    header("Pilot Module")
+
+    while true do
+        -- getNormalizedAngle returns [-1, +1].
+        -- Assumed: negative = left turn, positive = right turn.
+        -- If left/right appear reversed in testing, swap the signs below.
+        local norm  = wheel.getNormalizedAngle()
+        local left  = math.max(-norm, 0)
+        local right = math.max( norm, 0)
+
+        rednet.broadcast({
+            type  = "pilot_data",
+            left  = left,
+            right = right,
+        }, PROTOCOL)
+
+        statusLine(3, string.format("  Wheel : %+.2f", norm))
+        statusLine(4, string.format("  Left  : %.2f",  left))
+        statusLine(5, string.format("  Right : %.2f",  right))
+
+        sleep(0.05)
+    end
+end
+
+--------------------------------------------------------------------------------
+-- Module: Engine
+--------------------------------------------------------------------------------
+
+local function runEngineSetup(cfg)
+    cls()
+    header("Engine Setup")
+    term.setCursorPos(1, 3)
+    print("  Scanning for analog_transmission peripherals...")
+    sleep(0.5)
+
+    local found = {}
+    for _, name in ipairs(peripheral.getNames()) do
+        if peripheral.getType(name) == "analog_transmission" then
+            found[#found+1] = name
+        end
+    end
+
+    if #found == 0 then
+        cls()
+        header("Engine Setup - ERROR")
+        term.setCursorPos(1, 3)
+        printError("  No analog_transmission peripherals found.")
+        print("  Connect them via networking cable.")
+        sleep(5)
+        return false
+    end
+
+    cls()
+    header("Engine Setup")
+    term.setCursorPos(1, 3)
+    print(string.format("  Found %d peripheral(s):", #found))
+    print("")
+    for i, name in ipairs(found) do
+        print(string.format("  [%d] %s", i, name))
+    end
+    print("")
+
+    local function pick(label)
+        while true do
+            term.write("  Select " .. label .. " engine (1-" .. #found .. "): ")
+            local n = tonumber(read())
+            if n and found[n] then return n end
+            printError("  Invalid selection. Try again.")
+        end
+    end
+
+    local li = pick("LEFT")
+    local ri = pick("RIGHT")
+
+    if li == ri then
+        printError("  Cannot assign the same peripheral to both engines.")
+        sleep(3)
+        return runEngineSetup(cfg)
+    end
+
+    cfg.leftEngineName  = found[li]
+    cfg.rightEngineName = found[ri]
+    saveConfig(cfg)
+
+    print("")
+    print("  Left engine  : " .. cfg.leftEngineName)
+    print("  Right engine : " .. cfg.rightEngineName)
+    print("  Setup complete.")
+    sleep(2)
+    return true
+end
+
+local function runEngine(cfg)
+    if not cfg.leftEngineName or not cfg.rightEngineName then
+        local ok = runEngineSetup(cfg)
+        if not ok then return end
+    end
+
+    local leftEng  = peripheral.wrap(cfg.leftEngineName)
+    local rightEng = peripheral.wrap(cfg.rightEngineName)
+
+    if not leftEng or not rightEng then
+        cls()
+        header("Engine Module - ERROR")
+        term.setCursorPos(1, 3)
+        printError("  Engine peripheral(s) not found.")
+        print("  Left:  " .. (cfg.leftEngineName  or "?"))
+        print("  Right: " .. (cfg.rightEngineName or "?"))
+        print("  Cables may have changed. Re-running setup...")
+        sleep(3)
+        cfg.leftEngineName  = nil
+        cfg.rightEngineName = nil
+        saveConfig(cfg)
+        local ok = runEngineSetup(cfg)
+        if not ok then return end
+        leftEng  = peripheral.wrap(cfg.leftEngineName)
+        rightEng = peripheral.wrap(cfg.rightEngineName)
+        if not leftEng or not rightEng then return end
+    end
+
+    local sData = { throttle = 0, reverse = false }
+    local pData = { left = 0, right = 0 }
+
+    local function applyEngines()
+        local base      = (sData.reverse and -1 or 1) * (sData.throttle / 15)
+        local turn      = pData.left - pData.right
+        local leftFrac  = math.max(-1, math.min(1, base - turn))
+        local rightFrac = math.max(-1, math.min(1, base + turn))
+
+        rs.setOutput("left",  leftFrac  < 0)
+        rs.setOutput("right", rightFrac < 0)
+        leftEng.setSignal( math.floor(math.abs(leftFrac)  * 15 + 0.5))
+        rightEng.setSignal(math.floor(math.abs(rightFrac) * 15 + 0.5))
+
+        return leftFrac, rightFrac
+    end
+
+    cls()
+    header("Engine Module")
+
+    local function receiveLoop()
+        while true do
+            local _, msg = rednet.receive(PROTOCOL)
+            if msg then
+                if msg.type == "sensor_data" then sData = msg end
+                if msg.type == "pilot_data"  then pData = msg end
+            end
+        end
+    end
+
+    local function controlLoop()
+        while true do
+            local lf, rf = applyEngines()
+            statusLine(3, string.format("  Throttle : %d/15  Reverse: %s",
+                sData.throttle, sData.reverse and "ON" or "OFF"))
+            statusLine(4, string.format("  Steering : L=%.2f  R=%.2f",
+                pData.left, pData.right))
+            statusLine(5, string.format("  L Engine : %s  %.0f/15",
+                lf < 0 and "REV" or "FWD", math.abs(lf) * 15))
+            statusLine(6, string.format("  R Engine : %s  %.0f/15",
+                rf < 0 and "REV" or "FWD", math.abs(rf) * 15))
+            sleep(0.05)
+        end
+    end
+
+    parallel.waitForAny(receiveLoop, controlLoop)
+end
+
+--------------------------------------------------------------------------------
+-- Main
+--------------------------------------------------------------------------------
+
+local cfg = loadConfig()
+
+if not openWirelessModem() then
+    cls()
+    header("Error")
+    term.setCursorPos(1, 3)
+    printError("  No wireless modem found.")
+    print("  Attach a wireless modem to this computer.")
+    sleep(5)
+    return
+end
+
+local module = getModule(cfg)
+
+cls()
+header("Starting " .. module .. "...")
+sleep(0.3)
+
+if     module == "sensor"  then runSensor()
+elseif module == "readout" then runReadout()
+elseif module == "pilot"   then runPilot()
+elseif module == "engine"  then runEngine(cfg)
+end
