@@ -1,7 +1,7 @@
 -- Axiom Navigation Systems v1.0.0
 -- Navigation control system for the AXIOM airship
 
-local VERSION     = "1.0.0"
+local VERSION     = "1.0.1"
 local CONFIG_PATH = "ans_config.json"
 local PROTOCOL    = "axiom_nav"
 
