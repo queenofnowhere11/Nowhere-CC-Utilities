@@ -1,7 +1,7 @@
--- Axiom Navigation Systems v1.0.2
+-- Axiom Navigation Systems v1.0.4
 -- Navigation control system for the AXIOM airship
 
-local VERSION     = "1.0.2"
+local VERSION     = "1.0.4"
 local CONFIG_PATH = "ans_config.json"
 local PROTOCOL    = "axiom_nav"
 
@@ -72,6 +72,20 @@ local function statusLine(row, text)
     term.setCursorPos(1, row)
     term.clearLine()
     term.write(text)
+end
+
+local function footer(text)
+    term.setCursorPos(1, H)
+    if term.isColour() then
+        term.setTextColour(colours.black)
+        term.setBackgroundColour(colours.lightGrey)
+    end
+    local line = " " .. text
+    term.write(line .. string.rep(" ", math.max(0, W - #line)))
+    if term.isColour() then
+        term.setTextColour(colours.white)
+        term.setBackgroundColour(colours.black)
+    end
 end
 
 --------------------------------------------------------------------------------
@@ -154,6 +168,26 @@ local function getModule(cfg)
 end
 
 --------------------------------------------------------------------------------
+-- Network restart
+--------------------------------------------------------------------------------
+
+local function restartListener()
+    while true do
+        local event, p1, p2, p3 = os.pullEvent()
+        if event == "key" and p1 == keys.u then
+            statusLine(H, "  Sending restart to all modules...")
+            rednet.broadcast({ type = "ans_restart" }, PROTOCOL)
+            sleep(0.2)
+            os.reboot()
+        elseif event == "rednet_message" and p3 == PROTOCOL then
+            if type(p2) == "table" and p2.type == "ans_restart" then
+                os.reboot()
+            end
+        end
+    end
+end
+
+--------------------------------------------------------------------------------
 -- Module: Sensor
 --------------------------------------------------------------------------------
 
@@ -183,58 +217,45 @@ local function runSensor()
 
     cls()
     header("Sensor Module")
+    footer("[U] Restart All")
 
-    local function safeNav(fn)
-        local ok, v = pcall(fn)
-        if not ok then return "err" end
-        if type(v) == "number" then return string.format("%.4f", v) end
-        if type(v) == "table"  then return string.format("{x=%.3f y=%.3f z=%.3f w=%.3f}", v.x or 0, v.y or 0, v.z or 0, v.w or 0) end
-        return tostring(v)
+    local function loop()
+        while true do
+            local throttle  = bridge.getLinkSignal(THROTTLE_F1, THROTTLE_F2)
+            local reverse   = bridge.getLinkSignal(REVERSE_F1,  REVERSE_F2) == 15
+            local altitude  = altSensor.getHeight()
+            local velocity  = -velSensor.getVelocity()  -- sensor sign is inverted; negate for forward=positive
+            local autopilot = navTable.hasTarget()
+            -- getRelativeAngle: 0/360=behind, 90=left, 180=ahead, 270=right
+            local heading   = navTable.getRelativeAngle()
+            local distance  = autopilot and navTable.getDistanceToTarget() or nil
+            local fuel      = bridge.getLinkSignal(FUEL_F1, FUEL_F2)
+
+            rednet.broadcast({
+                type      = "sensor_data",
+                throttle  = throttle,
+                reverse   = reverse,
+                altitude  = altitude,
+                velocity  = velocity,
+                autopilot = autopilot,
+                heading   = heading,
+                distance  = distance,
+                fuel      = fuel,
+            }, PROTOCOL)
+
+            statusLine(3, string.format("  Altitude : %.1f m", altitude))
+            statusLine(4, string.format("  Velocity : %.2f m/s", velocity))
+            statusLine(5, string.format("  Throttle : %d/15%s", throttle, reverse and "  [REVERSE]" or ""))
+            statusLine(6, string.format("  Autopilot: %s%s", autopilot and "ON" or "OFF",
+                distance and string.format("  (%.0f m)", distance) or ""))
+            statusLine(7, string.format("  Heading  : %.1f deg", heading))
+            statusLine(8, string.format("  Fuel     : %d/15", fuel))
+
+            sleep(0.05)
+        end
     end
 
-    while true do
-        local throttle  = bridge.getLinkSignal(THROTTLE_F1, THROTTLE_F2)
-        local reverse   = bridge.getLinkSignal(REVERSE_F1,  REVERSE_F2) == 15
-        local altitude  = altSensor.getHeight()
-        local velocity  = velSensor.getVelocity()
-        local autopilot = navTable.hasTarget()
-        local heading   = navTable.getHeading()
-        local distance  = autopilot and navTable.getDistanceToTarget() or nil
-        local fuel      = bridge.getLinkSignal(FUEL_F1, FUEL_F2)
-
-        rednet.broadcast({
-            type      = "sensor_data",
-            throttle  = throttle,
-            reverse   = reverse,
-            altitude  = altitude,
-            velocity  = velocity,
-            autopilot = autopilot,
-            heading   = heading,
-            distance  = distance,
-            fuel      = fuel,
-        }, PROTOCOL)
-
-        statusLine(3,  string.format("  Altitude : %.1f m", altitude))
-        statusLine(4,  string.format("  Velocity : %.2f m/s", velocity))
-        statusLine(5,  string.format("  Throttle : %d/15%s", throttle, reverse and "  [REVERSE]" or ""))
-        statusLine(6,  string.format("  Autopilot: %s%s", autopilot and "ON" or "OFF",
-            distance and string.format("  (%.0f m)", distance) or ""))
-        statusLine(7,  string.format("  Fuel     : %d/15", fuel))
-        -- Nav table debug (temporary)
-        statusLine(9,  "  [Navigation Table]")
-        statusLine(10, string.format("  getHeading        : %s", safeNav(function() return navTable.getHeading() end)))
-        statusLine(11, string.format("  getHeadingRad     : %s", safeNav(function() return navTable.getHeadingRad() end)))
-        statusLine(12, string.format("  getRelativeAngle  : %s", safeNav(function() return navTable.getRelativeAngle() end)))
-        statusLine(13, string.format("  getRelAngleRad    : %s", safeNav(function() return navTable.getRelativeAngleRad() end)))
-        statusLine(14, string.format("  getBearing        : %s", safeNav(function() return navTable.getBearing() end)))
-        statusLine(15, string.format("  getBearingRad     : %s", safeNav(function() return navTable.getBearingRad() end)))
-        statusLine(16, string.format("  getDistToTarget   : %s", safeNav(function() return navTable.getDistanceToTarget() end)))
-        statusLine(17, string.format("  getClosureRate    : %s", safeNav(function() return navTable.getClosureRate() end)))
-        statusLine(18, string.format("  getVertOffset     : %s", safeNav(function() return navTable.getVerticalOffsetToTarget() end)))
-        statusLine(19, string.format("  getOrientation    : %s", safeNav(function() return navTable.getOrientation() end)))
-
-        sleep(0.05)
-    end
+    parallel.waitForAny(loop, restartListener)
 end
 
 --------------------------------------------------------------------------------
@@ -303,17 +324,22 @@ local function runReadout()
 
     cls()
     header("Readout Module")
+    footer("[U] Restart All")
     term.setCursorPos(1, 3)
     print("  Waiting for sensor data...")
 
     local lastData = {}
-    while true do
-        local _, msg = rednet.receive(PROTOCOL, 1)
-        if msg and msg.type == "sensor_data" then
-            lastData = msg
-            redraw(lastData)
+    local function loop()
+        while true do
+            local _, msg = rednet.receive(PROTOCOL, 1)
+            if msg and msg.type == "sensor_data" then
+                lastData = msg
+                redraw(lastData)
+            end
         end
     end
+
+    parallel.waitForAny(loop, restartListener)
 end
 
 --------------------------------------------------------------------------------
@@ -333,25 +359,30 @@ local function runPilot()
 
     cls()
     header("Pilot Module")
+    footer("[U] Restart All")
 
-    while true do
-        -- getNormalizedAngle: positive = left, negative = right (confirmed in testing)
-        local norm  = wheel.getNormalizedAngle()
-        local left  = math.max( norm, 0)
-        local right = math.max(-norm, 0)
+    local function loop()
+        while true do
+            -- getNormalizedAngle: positive = left, negative = right (confirmed in testing)
+            local norm  = wheel.getNormalizedAngle()
+            local left  = math.max( norm, 0)
+            local right = math.max(-norm, 0)
 
-        rednet.broadcast({
-            type  = "pilot_data",
-            left  = left,
-            right = right,
-        }, PROTOCOL)
+            rednet.broadcast({
+                type  = "pilot_data",
+                left  = left,
+                right = right,
+            }, PROTOCOL)
 
-        statusLine(3, string.format("  Wheel : %+.2f", norm))
-        statusLine(4, string.format("  Left  : %.2f",  left))
-        statusLine(5, string.format("  Right : %.2f",  right))
+            statusLine(3, string.format("  Wheel : %+.2f", norm))
+            statusLine(4, string.format("  Left  : %.2f",  left))
+            statusLine(5, string.format("  Right : %.2f",  right))
 
-        sleep(0.05)
+            sleep(0.05)
+        end
     end
+
+    parallel.waitForAny(loop, restartListener)
 end
 
 --------------------------------------------------------------------------------
@@ -459,16 +490,18 @@ local function runEngine(cfg)
         local leftFrac  = math.max(-1, math.min(1, base - turn))
         local rightFrac = math.max(-1, math.min(1, base + turn))
 
+        -- Signal is inverted: 15 = stopped, 0 = full power
         rs.setOutput("left",  leftFrac  < 0)
         rs.setOutput("right", rightFrac < 0)
-        leftEng.setSignal( math.floor(math.abs(leftFrac)  * 15 + 0.5))
-        rightEng.setSignal(math.floor(math.abs(rightFrac) * 15 + 0.5))
+        leftEng.setSignal( math.floor((1 - math.abs(leftFrac))  * 15 + 0.5))
+        rightEng.setSignal(math.floor((1 - math.abs(rightFrac)) * 15 + 0.5))
 
         return leftFrac, rightFrac
     end
 
     cls()
     header("Engine Module")
+    footer("[U] Restart All")
 
     local function receiveLoop()
         while true do
@@ -495,7 +528,7 @@ local function runEngine(cfg)
         end
     end
 
-    parallel.waitForAny(receiveLoop, controlLoop)
+    parallel.waitForAny(receiveLoop, controlLoop, restartListener)
 end
 
 --------------------------------------------------------------------------------
