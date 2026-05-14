@@ -35,11 +35,10 @@ end
 -- Vessel check
 --------------------------------------------------------------------------------
 
-local assembler = peripheral.find("physics_assembler")
-if not assembler or assembler.getSubLevelName() ~= "AXIOM" then
-    local name = assembler and tostring(assembler.getSubLevelName()) or "none"
+local vesselName = sublevel and sublevel.getName()
+if vesselName ~= "AXIOM" then
     print("ERROR: This program only runs on the AXIOM.")
-    print("       Vessel name: " .. name)
+    print("       Vessel name: " .. tostring(vesselName))
     sleep(5)
     return
 end
