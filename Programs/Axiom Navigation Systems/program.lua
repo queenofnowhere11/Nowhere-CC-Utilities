@@ -1,7 +1,7 @@
--- Axiom Navigation Systems v1.0.0
+-- Axiom Navigation Systems v1.0.2
 -- Navigation control system for the AXIOM airship
 
-local VERSION     = "1.0.1"
+local VERSION     = "1.0.2"
 local CONFIG_PATH = "ans_config.json"
 local PROTOCOL    = "axiom_nav"
 
@@ -184,6 +184,14 @@ local function runSensor()
     cls()
     header("Sensor Module")
 
+    local function safeNav(fn)
+        local ok, v = pcall(fn)
+        if not ok then return "err" end
+        if type(v) == "number" then return string.format("%.4f", v) end
+        if type(v) == "table"  then return string.format("{x=%.3f y=%.3f z=%.3f w=%.3f}", v.x or 0, v.y or 0, v.z or 0, v.w or 0) end
+        return tostring(v)
+    end
+
     while true do
         local throttle  = bridge.getLinkSignal(THROTTLE_F1, THROTTLE_F2)
         local reverse   = bridge.getLinkSignal(REVERSE_F1,  REVERSE_F2) == 15
@@ -206,13 +214,24 @@ local function runSensor()
             fuel      = fuel,
         }, PROTOCOL)
 
-        statusLine(3, string.format("  Altitude : %.1f m", altitude))
-        statusLine(4, string.format("  Velocity : %.2f m/s", velocity))
-        statusLine(5, string.format("  Throttle : %d/15%s", throttle, reverse and "  [REVERSE]" or ""))
-        statusLine(6, string.format("  Autopilot: %s%s", autopilot and "ON" or "OFF",
+        statusLine(3,  string.format("  Altitude : %.1f m", altitude))
+        statusLine(4,  string.format("  Velocity : %.2f m/s", velocity))
+        statusLine(5,  string.format("  Throttle : %d/15%s", throttle, reverse and "  [REVERSE]" or ""))
+        statusLine(6,  string.format("  Autopilot: %s%s", autopilot and "ON" or "OFF",
             distance and string.format("  (%.0f m)", distance) or ""))
-        statusLine(7, string.format("  Heading  : %.1f deg", heading))
-        statusLine(8, string.format("  Fuel     : %d/15", fuel))
+        statusLine(7,  string.format("  Fuel     : %d/15", fuel))
+        -- Nav table debug (temporary)
+        statusLine(9,  "  [Navigation Table]")
+        statusLine(10, string.format("  getHeading        : %s", safeNav(function() return navTable.getHeading() end)))
+        statusLine(11, string.format("  getHeadingRad     : %s", safeNav(function() return navTable.getHeadingRad() end)))
+        statusLine(12, string.format("  getRelativeAngle  : %s", safeNav(function() return navTable.getRelativeAngle() end)))
+        statusLine(13, string.format("  getRelAngleRad    : %s", safeNav(function() return navTable.getRelativeAngleRad() end)))
+        statusLine(14, string.format("  getBearing        : %s", safeNav(function() return navTable.getBearing() end)))
+        statusLine(15, string.format("  getBearingRad     : %s", safeNav(function() return navTable.getBearingRad() end)))
+        statusLine(16, string.format("  getDistToTarget   : %s", safeNav(function() return navTable.getDistanceToTarget() end)))
+        statusLine(17, string.format("  getClosureRate    : %s", safeNav(function() return navTable.getClosureRate() end)))
+        statusLine(18, string.format("  getVertOffset     : %s", safeNav(function() return navTable.getVerticalOffsetToTarget() end)))
+        statusLine(19, string.format("  getOrientation    : %s", safeNav(function() return navTable.getOrientation() end)))
 
         sleep(0.05)
     end
@@ -316,12 +335,10 @@ local function runPilot()
     header("Pilot Module")
 
     while true do
-        -- getNormalizedAngle returns [-1, +1].
-        -- Assumed: negative = left turn, positive = right turn.
-        -- If left/right appear reversed in testing, swap the signs below.
+        -- getNormalizedAngle: positive = left, negative = right (confirmed in testing)
         local norm  = wheel.getNormalizedAngle()
-        local left  = math.max(-norm, 0)
-        local right = math.max( norm, 0)
+        local left  = math.max( norm, 0)
+        local right = math.max(-norm, 0)
 
         rednet.broadcast({
             type  = "pilot_data",
