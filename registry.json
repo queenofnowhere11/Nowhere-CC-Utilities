@@ -26,7 +26,7 @@
       "id": "axiom-navigator",
       "name": "Axiom Navigation Systems",
       "description": "Control systems for the Axiom airship",
-      "version": "1.0.11",
+      "version": "1.0.12",
       "main": "program.lua",
       "files": [
         { "src": "Programs/Axiom Navigation Systems/program.lua", "dest": "program.lua" },

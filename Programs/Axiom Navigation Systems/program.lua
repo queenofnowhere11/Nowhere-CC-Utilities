@@ -1,7 +1,7 @@
 -- Axiom Navigation Systems v1.0.7
 -- Navigation control system for the AXIOM airship
 
-local VERSION     = "1.0.11"
+local VERSION     = "1.0.12"
 local CONFIG_PATH = "ans_config.json"
 local PROTOCOL    = "axiom_nav"
 
@@ -387,7 +387,7 @@ end
 -- Module: Pilot
 --------------------------------------------------------------------------------
 
-local function runPilot()
+local function runPilot(cfg)
     local wheel = peripheral.find("steering_wheel")
     if not wheel then
         cls()
@@ -398,16 +398,25 @@ local function runPilot()
         return
     end
 
-    local speaker    = peripheral.find("speaker")
-    local soundQueue = {}
+    local speaker     = peripheral.find("speaker")
+    local soundQueue  = {}
+    local soundVolume = cfg.soundVolume or 1.0
 
     local lastAutopilot = false
     local lastArrived   = false
     local latestSData   = {}
 
+    local ok, dfpwm = pcall(require, "cc.audio.dfpwm")
+    if not ok then
+        dfpwm = nil
+        local ok2
+        ok2, dfpwm = pcall(require, "dfpwm")
+        if not ok2 then dfpwm = nil end
+    end
+
     cls()
     header("Pilot Module")
-    footer("[U] Restart All")
+    footer("[U] Update  [+/-] Volume")
 
     local function pilotLoop()
         while true do
@@ -427,17 +436,10 @@ local function runPilot()
                 apStr = latestSData.arrived and "  [AP: ARRIVED]" or "  [AP: ON]"
             end
 
-            statusLine(3, string.format("  Wheel : %+.2f%s", norm, apStr))
-            statusLine(4, string.format("  Left  : %.2f",  left))
-            statusLine(5, string.format("  Right : %.2f",  right))
-            statusLine(7, string.format("  Speaker : %s",
-                speaker and "found" or "NOT FOUND"))
-            statusLine(8, string.format("  dfpwm   : %s",
-                dfpwm and "loaded" or ("unavail: " .. (dfpwmErr or "?"):sub(1, 25))))
-            statusLine(8, string.format("  start.dfpwm : %s",
-                fs.exists(SOUNDS_PATH .. "autonav_start.dfpwm") and "found" or "NOT FOUND"))
-            statusLine(9, string.format("  stop.dfpwm  : %s",
-                fs.exists(SOUNDS_PATH .. "autonav_stop.dfpwm")  and "found" or "NOT FOUND"))
+            statusLine(3, string.format("  Wheel  : %+.2f%s", norm, apStr))
+            statusLine(4, string.format("  Left   : %.2f",  left))
+            statusLine(5, string.format("  Right  : %.2f",  right))
+            statusLine(7, string.format("  Volume : %.1f / 3.0", soundVolume))
 
             sleep(0.05)
         end
@@ -461,16 +463,6 @@ local function runPilot()
         end
     end
 
-    local dfpwmErr
-    local ok, dfpwm = pcall(require, "cc.audio.dfpwm")
-    if not ok then
-        dfpwmErr = tostring(dfpwm)
-        dfpwm = nil
-        local ok2
-        ok2, dfpwm = pcall(require, "dfpwm")
-        if not ok2 then dfpwm = nil end
-    end
-
     local function soundLoop()
         while true do
             if #soundQueue > 0 then
@@ -482,7 +474,7 @@ local function runPilot()
                         local chunk = f.read(16 * 1024)
                         if not chunk then break end
                         local buffer = decoder(chunk)
-                        while not speaker.playAudio(buffer) do
+                        while not speaker.playAudio(buffer, soundVolume) do
                             os.pullEvent("speaker_audio_empty")
                         end
                     end
@@ -494,10 +486,25 @@ local function runPilot()
         end
     end
 
+    local function keyHandler()
+        while true do
+            local _, key = os.pullEvent("key")
+            if key == keys.equals or key == keys.numPadAdd then
+                soundVolume = math.min(3.0, soundVolume + 0.5)
+                cfg.soundVolume = soundVolume
+                saveConfig(cfg)
+            elseif key == keys.minus or key == keys.numPadSubtract then
+                soundVolume = math.max(0.0, soundVolume + -0.5)
+                cfg.soundVolume = soundVolume
+                saveConfig(cfg)
+            end
+        end
+    end
+
     if speaker and dfpwm then
-        parallel.waitForAny(pilotLoop, receiveLoop, soundLoop, restartListener)
+        parallel.waitForAny(pilotLoop, receiveLoop, soundLoop, keyHandler, restartListener)
     else
-        parallel.waitForAny(pilotLoop, receiveLoop, restartListener)
+        parallel.waitForAny(pilotLoop, receiveLoop, keyHandler, restartListener)
     end
 end
 
@@ -698,6 +705,6 @@ sleep(0.3)
 
 if     module == "sensor"  then runSensor()
 elseif module == "readout" then runReadout()
-elseif module == "pilot"   then runPilot()
+elseif module == "pilot"   then runPilot(cfg)
 elseif module == "engine"  then runEngine(cfg)
 end
