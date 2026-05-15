@@ -1,9 +1,12 @@
--- Axiom Navigation Systems v1.0.5
+-- Axiom Navigation Systems v1.0.6
 -- Navigation control system for the AXIOM airship
 
-local VERSION     = "1.0.5"
+local VERSION     = "1.0.6"
 local CONFIG_PATH = "ans_config.json"
 local PROTOCOL    = "axiom_nav"
+
+local GITHUB_RAW  = "https://raw.githubusercontent.com/queenofnowhere11/Nowhere-CC-Utilities/main/"
+local PROGRAM_SRC = "Programs/Axiom Navigation Systems/program.lua"
 
 -- Redstone Link Bridge frequencies
 local THROTTLE_F1 = "everycomp:tf/biomeswevegone/hollow_ebony_log"
@@ -168,20 +171,43 @@ local function getModule(cfg)
 end
 
 --------------------------------------------------------------------------------
--- Network restart
+-- Network restart / update
 --------------------------------------------------------------------------------
+
+local function updateAndRestart()
+    local myPath = shell.getRunningProgram()
+    footer("  Downloading update...")
+    if http then
+        local url  = (GITHUB_RAW .. PROGRAM_SRC):gsub(" ", "%%20")
+        local resp = http.get(url)
+        if resp then
+            local content = resp.readAll()
+            resp.close()
+            local f = fs.open(myPath, "w")
+            f.write(content)
+            f.close()
+            footer("  Updated. Rebooting...")
+        else
+            footer("  Download failed. Rebooting...")
+        end
+    else
+        footer("  HTTP unavailable. Rebooting...")
+    end
+    sleep(0.5)
+    os.reboot()
+end
 
 local function restartListener()
     while true do
         local event, p1, p2, p3 = os.pullEvent()
         if event == "key" and p1 == keys.u then
-            statusLine(H, "  Sending restart to all modules...")
+            footer("  Sending update to all modules...")
             rednet.broadcast({ type = "ans_restart" }, PROTOCOL)
             sleep(0.2)
-            os.reboot()
+            updateAndRestart()
         elseif event == "rednet_message" and p3 == PROTOCOL then
             if type(p2) == "table" and p2.type == "ans_restart" then
-                os.reboot()
+                updateAndRestart()
             end
         end
     end
