@@ -1,7 +1,7 @@
 -- Axiom Navigation Systems v1.0.7
 -- Navigation control system for the AXIOM airship
 
-local VERSION     = "1.1.6"
+local VERSION     = "1.1.7"
 local CONFIG_PATH = "ans_config.json"
 local PROTOCOL    = "axiom_nav"
 
@@ -256,17 +256,9 @@ local function runSensor()
         barrelSlots = ok and sz or "?"
     end
 
-    -- Show navTable methods for diagnostics
-    local navMethods = peripheral.getMethods(navTableName) or {}
-    local navMethodStr = table.concat(navMethods, ", ")
-
     cls()
     header("Sensor Module")
     footer("[U] Restart All")
-
-    statusLine(10, "  NavTable methods:")
-    statusLine(11, "  " .. navMethodStr:sub(1, W - 2))
-    statusLine(12, "  " .. navMethodStr:sub(W - 1, (W - 2) * 2))
 
     local function broadcastLoop()
         while true do
@@ -338,10 +330,9 @@ local function runSensor()
 
                 elseif msg.type == "nav_item_select" and barrel and navTable then
                     local ok, err = pcall(function()
-                        local navContents = navTable.list()
-                        if navContents and navContents[1] then
-                            navTable.pushItems(barrelName, 1)
-                        end
+                        -- Return current nav table item to barrel (no-op if slot is empty)
+                        barrel.pullItems(navTableName, 1)
+                        -- Push selected item from barrel to nav table
                         barrel.pushItems(navTableName, msg.slot, 1, 1)
                     end)
                     local errMsg
