@@ -1,7 +1,7 @@
 -- Axiom Navigation Systems v1.0.7
 -- Navigation control system for the AXIOM airship
 
-local VERSION     = "1.1.2"
+local VERSION     = "1.1.3"
 local CONFIG_PATH = "ans_config.json"
 local PROTOCOL    = "axiom_nav"
 
@@ -336,10 +336,11 @@ local function runSensor()
                         end
                         barrel.pushItems(navTableName, msg.slot, 1, 1)
                     end)
+                    local errMsg = ok and "OK" or (tostring(err):match(":%d+: (.+)$") or tostring(err))
                     rednet.broadcast({
                         type    = "nav_item_result",
                         success = ok,
-                        message = ok and "OK" or tostring(err),
+                        message = errMsg,
                     }, PROTOCOL)
                 end
             end
@@ -776,7 +777,7 @@ local function runPortable(cfg)
                         term.setTextColour(colours.black)
                         term.setBackgroundColour(colours.white)
                     end
-                    local line = string.format("  %s (%d)", item.displayName, item.count)
+                    local line = "  " .. item.displayName
                     term.write(line .. string.rep(" ", math.max(0, W2 - #line)))
                     if term.isColour() then
                         term.setTextColour(colours.white)
