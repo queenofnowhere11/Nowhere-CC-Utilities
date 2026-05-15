@@ -1,7 +1,7 @@
--- Axiom Navigation Systems v1.0.4
+-- Axiom Navigation Systems v1.0.5
 -- Navigation control system for the AXIOM airship
 
-local VERSION     = "1.0.4"
+local VERSION     = "1.0.5"
 local CONFIG_PATH = "ans_config.json"
 local PROTOCOL    = "axiom_nav"
 
@@ -306,9 +306,9 @@ local function runReadout()
 
         if d.autopilot then
             mwrite(rightMon, 2, 3,
-                string.format("AP  ON   %.0f m", d.distance or 0), colours.lime)
+                string.format("AUTO-NAV ON - %.0f m", d.distance or 0), colours.lime)
         else
-            mwrite(rightMon, 2, 3, "AP  OFF", colours.red)
+            mwrite(rightMon, 2, 3, "AUTO-NAV OFF", colours.red)
         end
 
         local fuelVal = d.fuel or 0
@@ -485,8 +485,25 @@ local function runEngine(cfg)
     local pData = { left = 0, right = 0 }
 
     local function applyEngines()
-        local base      = (sData.reverse and -1 or 1) * (sData.throttle / 15)
-        local turn      = pData.left - pData.right
+        local throttle, reverse, left, right
+
+        if sData.autopilot then
+            local h = sData.heading or 180
+            -- apWheel: -1 at 0deg(behind), 0 at 180deg(ahead), +1 at 360deg(behind)
+            local apWheel = h / 180 - 1
+            throttle = math.floor(math.abs(math.cos(math.rad(h))) * 15 + 0.5)
+            reverse  = (h < 90 or h > 270)
+            left     = math.max(-apWheel, 0)
+            right    = math.max( apWheel, 0)
+        else
+            throttle = sData.throttle
+            reverse  = sData.reverse
+            left     = pData.left
+            right    = pData.right
+        end
+
+        local base      = (reverse and -1 or 1) * (throttle / 15)
+        local turn      = left - right
         local leftFrac  = math.max(-1, math.min(1, base - turn))
         local rightFrac = math.max(-1, math.min(1, base + turn))
 
@@ -496,7 +513,7 @@ local function runEngine(cfg)
         leftEng.setSignal( math.floor((1 - math.abs(leftFrac))  * 15 + 0.5))
         rightEng.setSignal(math.floor((1 - math.abs(rightFrac)) * 15 + 0.5))
 
-        return leftFrac, rightFrac
+        return leftFrac, rightFrac, throttle, reverse, left, right
     end
 
     cls()
@@ -515,11 +532,11 @@ local function runEngine(cfg)
 
     local function controlLoop()
         while true do
-            local lf, rf = applyEngines()
-            statusLine(3, string.format("  Throttle : %d/15  Reverse: %s",
-                sData.throttle, sData.reverse and "ON" or "OFF"))
-            statusLine(4, string.format("  Steering : L=%.2f  R=%.2f",
-                pData.left, pData.right))
+            local lf, rf, thr, rev, lv, rv = applyEngines()
+            local apFlag = sData.autopilot and "  [AP]" or ""
+            statusLine(3, string.format("  Throttle : %d/15  Reverse: %s%s",
+                thr, rev and "ON" or "OFF", apFlag))
+            statusLine(4, string.format("  Steering : L=%.2f  R=%.2f", lv, rv))
             statusLine(5, string.format("  L Engine : %s  %.0f/15",
                 lf < 0 and "REV" or "FWD", math.abs(lf) * 15))
             statusLine(6, string.format("  R Engine : %s  %.0f/15",
