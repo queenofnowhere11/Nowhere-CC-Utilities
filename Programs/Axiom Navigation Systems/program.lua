@@ -1,12 +1,13 @@
--- Axiom Navigation Systems v1.0.6
+-- Axiom Navigation Systems v1.0.7
 -- Navigation control system for the AXIOM airship
 
-local VERSION     = "1.0.6"
+local VERSION     = "1.0.7"
 local CONFIG_PATH = "ans_config.json"
 local PROTOCOL    = "axiom_nav"
 
 local GITHUB_RAW  = "https://raw.githubusercontent.com/queenofnowhere11/Nowhere-CC-Utilities/main/"
 local PROGRAM_SRC = "Programs/Axiom Navigation Systems/program.lua"
+local SOUNDS_PATH = fs.getDir(shell.getRunningProgram()) .. "/sounds/"
 
 -- Redstone Link Bridge frequencies
 local THROTTLE_F1 = "everycomp:tf/biomeswevegone/hollow_ebony_log"
@@ -255,6 +256,7 @@ local function runSensor()
             -- getRelativeAngle: 0/360=behind, 90=left, 180=ahead, 270=right
             local heading   = navTable.getRelativeAngle()
             local distance  = autopilot and navTable.getDistanceToTarget() or nil
+            local arrived   = autopilot and distance ~= nil and (distance < altitude - 50)
             local fuel      = bridge.getLinkSignal(FUEL_F1, FUEL_F2)
 
             rednet.broadcast({
@@ -266,14 +268,23 @@ local function runSensor()
                 autopilot = autopilot,
                 heading   = heading,
                 distance  = distance,
+                arrived   = arrived,
                 fuel      = fuel,
             }, PROTOCOL)
+
+            local apStatus
+            if not autopilot then
+                apStatus = "OFF"
+            elseif arrived then
+                apStatus = "ON - ARRIVED"
+            else
+                apStatus = string.format("ON  (%.0f m)", distance or 0)
+            end
 
             statusLine(3, string.format("  Altitude : %.1f m", altitude))
             statusLine(4, string.format("  Velocity : %.2f m/s", velocity))
             statusLine(5, string.format("  Throttle : %d/15%s", throttle, reverse and "  [REVERSE]" or ""))
-            statusLine(6, string.format("  Autopilot: %s%s", autopilot and "ON" or "OFF",
-                distance and string.format("  (%.0f m)", distance) or ""))
+            statusLine(6, string.format("  Autopilot: %s", apStatus))
             statusLine(7, string.format("  Heading  : %.1f deg", heading))
             statusLine(8, string.format("  Fuel     : %d/15", fuel))
 
@@ -331,8 +342,12 @@ local function runReadout()
         mwrite(rightMon, 2, 1, "STATUS", colours.cyan)
 
         if d.autopilot then
-            mwrite(rightMon, 2, 3,
-                string.format("AUTO-NAV ON - %.0f m", d.distance or 0), colours.lime)
+            if d.arrived then
+                mwrite(rightMon, 2, 3, "AUTO-NAV ON - ARRIVED", colours.lime)
+            else
+                mwrite(rightMon, 2, 3,
+                    string.format("AUTO-NAV ON - %.0f m", d.distance or 0), colours.lime)
+            end
         else
             mwrite(rightMon, 2, 3, "AUTO-NAV OFF", colours.red)
         end
@@ -383,11 +398,18 @@ local function runPilot()
         return
     end
 
+    local speaker    = peripheral.find("speaker")
+    local soundQueue = {}
+
+    local lastAutopilot = false
+    local lastArrived   = false
+    local latestSData   = {}
+
     cls()
     header("Pilot Module")
     footer("[U] Restart All")
 
-    local function loop()
+    local function pilotLoop()
         while true do
             -- getNormalizedAngle: positive = left, negative = right (confirmed in testing)
             local norm  = wheel.getNormalizedAngle()
@@ -400,7 +422,12 @@ local function runPilot()
                 right = right,
             }, PROTOCOL)
 
-            statusLine(3, string.format("  Wheel : %+.2f", norm))
+            local apStr = ""
+            if latestSData.autopilot then
+                apStr = latestSData.arrived and "  [AP: ARRIVED]" or "  [AP: ON]"
+            end
+
+            statusLine(3, string.format("  Wheel : %+.2f%s", norm, apStr))
             statusLine(4, string.format("  Left  : %.2f",  left))
             statusLine(5, string.format("  Right : %.2f",  right))
 
@@ -408,7 +435,55 @@ local function runPilot()
         end
     end
 
-    parallel.waitForAny(loop, restartListener)
+    local function receiveLoop()
+        while true do
+            local _, msg = rednet.receive(PROTOCOL)
+            if msg and msg.type == "sensor_data" then
+                local newAp  = msg.autopilot or false
+                local newArr = msg.arrived   or false
+                if not lastAutopilot and newAp and not newArr then
+                    soundQueue[#soundQueue + 1] = SOUNDS_PATH .. "autonav_start.dfpwm"
+                elseif lastAutopilot and not lastArrived and newArr then
+                    soundQueue[#soundQueue + 1] = SOUNDS_PATH .. "autonav_stop.dfpwm"
+                end
+                lastAutopilot = newAp
+                lastArrived   = newArr
+                latestSData   = msg
+            end
+        end
+    end
+
+    local ok, dfpwm = pcall(require, "cc.audio.dfpwm")
+    if not ok then dfpwm = nil end
+
+    local function soundLoop()
+        while true do
+            if #soundQueue > 0 then
+                local path = table.remove(soundQueue, 1)
+                if fs.exists(path) then
+                    local decoder = dfpwm.make_decoder()
+                    local f = fs.open(path, "rb")
+                    while true do
+                        local chunk = f.read(16 * 1024)
+                        if not chunk then break end
+                        local buffer = decoder(chunk)
+                        while not speaker.playAudio(buffer) do
+                            os.pullEvent("speaker_audio_empty")
+                        end
+                    end
+                    f.close()
+                end
+            else
+                sleep(0.05)
+            end
+        end
+    end
+
+    if speaker and dfpwm then
+        parallel.waitForAny(pilotLoop, receiveLoop, soundLoop, restartListener)
+    else
+        parallel.waitForAny(pilotLoop, receiveLoop, restartListener)
+    end
 end
 
 --------------------------------------------------------------------------------
@@ -514,13 +589,20 @@ local function runEngine(cfg)
         local throttle, reverse, left, right
 
         if sData.autopilot then
-            local h = sData.heading or 180
-            -- apWheel: -1 at 0deg(behind), 0 at 180deg(ahead), +1 at 360deg(behind)
-            local apWheel = h / 180 - 1
-            throttle = math.floor(math.abs(math.cos(math.rad(h))) * 15 + 0.5)
-            reverse  = (h < 90 or h > 270)
-            left     = math.max(-apWheel, 0)
-            right    = math.max( apWheel, 0)
+            if sData.arrived then
+                throttle = 0
+                reverse  = false
+                left     = 0
+                right    = 0
+            else
+                local h = sData.heading or 180
+                -- full deflection outside ±30° of 180°; interpolate within that window
+                local apWheel = math.max(-1, math.min(1, (h - 180) / 30))
+                throttle = math.floor(math.abs(math.cos(math.rad(h))) * 15 + 0.5)
+                reverse  = (h < 90 or h > 270)
+                left     = math.max(-apWheel, 0)
+                right    = math.max( apWheel, 0)
+            end
         else
             throttle = sData.throttle
             reverse  = sData.reverse
@@ -559,7 +641,10 @@ local function runEngine(cfg)
     local function controlLoop()
         while true do
             local lf, rf, thr, rev, lv, rv = applyEngines()
-            local apFlag = sData.autopilot and "  [AP]" or ""
+            local apFlag = ""
+            if sData.autopilot then
+                apFlag = sData.arrived and "  [AP: ARRIVED]" or "  [AP]"
+            end
             statusLine(3, string.format("  Throttle : %d/15  Reverse: %s%s",
                 thr, rev and "ON" or "OFF", apFlag))
             statusLine(4, string.format("  Steering : L=%.2f  R=%.2f", lv, rv))
