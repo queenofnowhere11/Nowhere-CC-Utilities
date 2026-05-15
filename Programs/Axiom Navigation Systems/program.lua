@@ -1,7 +1,7 @@
 -- Axiom Navigation Systems v1.0.7
 -- Navigation control system for the AXIOM airship
 
-local VERSION     = "1.1.7"
+local VERSION     = "1.1.8"
 local CONFIG_PATH = "ans_config.json"
 local PROTOCOL    = "axiom_nav"
 
@@ -330,10 +330,10 @@ local function runSensor()
 
                 elseif msg.type == "nav_item_select" and barrel and navTable then
                     local ok, err = pcall(function()
-                        -- Return current nav table item to barrel (no-op if slot is empty)
-                        barrel.pullItems(navTableName, 1)
-                        -- Push selected item from barrel to nav table
-                        barrel.pushItems(navTableName, msg.slot, 1, 1)
+                        local moved = barrel.pushItems(navTableName, msg.slot, 1, 1)
+                        if moved == 0 then
+                            error("nav table slot is full")
+                        end
                     end)
                     local errMsg
                     if ok then
