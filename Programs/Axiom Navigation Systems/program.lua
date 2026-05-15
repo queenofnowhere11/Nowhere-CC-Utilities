@@ -1,7 +1,7 @@
 -- Axiom Navigation Systems v1.0.7
 -- Navigation control system for the AXIOM airship
 
-local VERSION     = "1.0.12"
+local VERSION     = "1.1.0"
 local CONFIG_PATH = "ans_config.json"
 local PROTOCOL    = "axiom_nav"
 
@@ -114,13 +114,21 @@ end
 --------------------------------------------------------------------------------
 
 local MODULES = {
-    { id = "sensor",  label = "Sensor",  desc = "Reads sensors, broadcasts to network"         },
-    { id = "readout", label = "Readout", desc = "Displays flight data on cockpit monitors"      },
-    { id = "pilot",   label = "Pilot",   desc = "Reads steering wheel, broadcasts turn values"  },
-    { id = "engine",  label = "Engine",  desc = "Controls left and right engine outputs"        },
+    { id = "sensor",       label = "Sensor",   desc = "Reads sensors, broadcasts to network"         },
+    { id = "readout",      label = "Readout",  desc = "Displays flight data on cockpit monitors"      },
+    { id = "pilot",        label = "Pilot",    desc = "Reads steering wheel, broadcasts turn values"  },
+    { id = "engine",       label = "Engine",   desc = "Controls left and right engine outputs"        },
+    { id = "announcement", label = "Announce", desc = "Plays sounds for system events"               },
 }
 
 local function getModule(cfg)
+    -- Pocket computers always run the Portable module
+    if pocket ~= nil then
+        cfg.module = "portable"
+        saveConfig(cfg)
+        return "portable"
+    end
+
     while true do
         if not cfg.module then
             cls()
@@ -222,7 +230,18 @@ local function runSensor()
     local bridge    = peripheral.find("redstone_link_bridge")
     local altSensor = peripheral.find("altitude_sensor")
     local velSensor = peripheral.find("velocity_sensor")
-    local navTable  = peripheral.find("navigation_table")
+
+    -- Scan by name to capture both name and wrapped peripheral for items API
+    local navTableName, navTable = nil, nil
+    local barrelName,   barrel   = nil, nil
+    for _, name in ipairs(peripheral.getNames()) do
+        local t = peripheral.getType(name)
+        if t == "simulated:navigation_table" then
+            navTableName, navTable = name, peripheral.wrap(name)
+        elseif t == "sophisticatedstorage:barrel" then
+            barrelName, barrel = name, peripheral.wrap(name)
+        end
+    end
 
     local missing = {}
     if not bridge    then missing[#missing+1] = "redstone_link_bridge" end
@@ -242,16 +261,23 @@ local function runSensor()
         return
     end
 
+    -- Cache barrel slot count once (optional peripheral)
+    local barrelSlots = nil
+    if barrel then
+        local ok, sz = pcall(function() return barrel.size() end)
+        barrelSlots = ok and sz or "?"
+    end
+
     cls()
     header("Sensor Module")
     footer("[U] Restart All")
 
-    local function loop()
+    local function broadcastLoop()
         while true do
             local throttle  = bridge.getLinkSignal(THROTTLE_F1, THROTTLE_F2)
             local reverse   = bridge.getLinkSignal(REVERSE_F1,  REVERSE_F2) == 15
             local altitude  = altSensor.getHeight()
-            local velocity  = -velSensor.getVelocity()  -- sensor sign is inverted; negate for forward=positive
+            local velocity  = -velSensor.getVelocity()
             local autopilot = navTable.hasTarget()
             -- getRelativeAngle: 0/360=behind, 90=left, 180=ahead, 270=right
             local heading   = navTable.getRelativeAngle()
@@ -287,12 +313,174 @@ local function runSensor()
             statusLine(6, string.format("  Autopilot: %s", apStatus))
             statusLine(7, string.format("  Heading  : %.1f deg", heading))
             statusLine(8, string.format("  Fuel     : %d/15", fuel))
+            statusLine(9, barrel
+                and string.format("  Barrel   : found (%s slots)", tostring(barrelSlots))
+                or  "  Barrel   : not found")
 
             sleep(0.05)
         end
     end
 
-    parallel.waitForAny(loop, restartListener)
+    local function messageHandler()
+        while true do
+            local _, msg = rednet.receive(PROTOCOL)
+            if type(msg) == "table" then
+                if msg.type == "nav_item_list_request" and barrel then
+                    local items = {}
+                    for slot, _ in pairs(barrel.list()) do
+                        local d = barrel.getItemDetail(slot)
+                        if d then
+                            items[#items + 1] = {
+                                slot        = slot,
+                                name        = d.name,
+                                displayName = d.displayName or d.name,
+                                count       = d.count,
+                            }
+                        end
+                    end
+                    rednet.broadcast({ type = "nav_item_list", items = items }, PROTOCOL)
+
+                elseif msg.type == "nav_item_select" and barrel and navTable then
+                    local ok, err = pcall(function()
+                        local navContents = navTable.list()
+                        if navContents and navContents[1] then
+                            navTable.pushItems(barrelName, 1)
+                        end
+                        barrel.pushItems(navTableName, msg.slot, 1, 1)
+                    end)
+                    rednet.broadcast({
+                        type    = "nav_item_result",
+                        success = ok,
+                        message = ok and "OK" or tostring(err),
+                    }, PROTOCOL)
+                end
+            end
+        end
+    end
+
+    parallel.waitForAny(broadcastLoop, messageHandler, restartListener)
+end
+
+--------------------------------------------------------------------------------
+-- Module: Announcement
+--------------------------------------------------------------------------------
+
+local function runAnnouncement(cfg)
+    local speakers = { peripheral.find("speaker") }
+    local ok, dfpwm = pcall(require, "cc.audio.dfpwm")
+    if not ok then ok, dfpwm = pcall(require, "dfpwm") end
+    if not ok then dfpwm = nil end
+
+    local soundVolume   = cfg.soundVolume or 1.0
+    local soundQueue    = {}
+    local lastAutopilot = false
+    local lastArrived   = false
+    local lastFuel      = 15
+
+    cls()
+    header("Announcement Module")
+    footer("[U] Restart All  [+/-] Volume")
+
+    local function playSound(path)
+        if not dfpwm or #speakers == 0 or not fs.exists(path) then return end
+        local tasks = {}
+        for _, spk in ipairs(speakers) do
+            tasks[#tasks + 1] = function()
+                local decoder = dfpwm.make_decoder()
+                local f = fs.open(path, "rb")
+                while true do
+                    local chunk = f.read(16 * 1024)
+                    if not chunk then break end
+                    local buf = decoder(chunk)
+                    while not spk.playAudio(buf, soundVolume) do
+                        os.pullEvent("speaker_audio_empty")
+                    end
+                end
+                f.close()
+            end
+        end
+        parallel.waitForAll(table.unpack(tasks))
+    end
+
+    local function soundLoop()
+        while true do
+            if #soundQueue > 0 then
+                local path = table.remove(soundQueue, 1)
+                playSound(path)
+            else
+                sleep(0.1)
+            end
+        end
+    end
+
+    local function receiveLoop()
+        while true do
+            local _, msg = rednet.receive(PROTOCOL)
+            if type(msg) == "table" and msg.type == "sensor_data" then
+                local newAp   = msg.autopilot or false
+                local newArr  = msg.arrived   or false
+                local newFuel = msg.fuel       or 0
+
+                if not lastAutopilot and newAp and not newArr then
+                    soundQueue[#soundQueue + 1] = SOUNDS_PATH .. "autonav_start.dfpwm"
+                end
+                if newArr and not lastArrived then
+                    soundQueue[#soundQueue + 1] = SOUNDS_PATH .. "autonav_stop.dfpwm"
+                end
+                if lastFuel > 3 and newFuel <= 3 and newFuel > 0 then
+                    soundQueue[#soundQueue + 1] = SOUNDS_PATH .. "fuel_low.dfpwm"
+                end
+                if lastFuel > 0 and newFuel == 0 then
+                    soundQueue[#soundQueue + 1] = SOUNDS_PATH .. "fuel_empty.dfpwm"
+                end
+
+                lastAutopilot = newAp
+                lastArrived   = newArr
+                lastFuel      = newFuel
+
+                local apStr
+                if not newAp then
+                    apStr = "OFF"
+                elseif newArr then
+                    apStr = "ARRIVED"
+                else
+                    apStr = "ON"
+                end
+
+                statusLine(3, string.format("  Speakers : %d found",    #speakers))
+                statusLine(4, string.format("  dfpwm    : %s",          dfpwm and "loaded" or "unavailable"))
+                statusLine(5, string.format("  Volume   : %.1f / 3.0",  soundVolume))
+                statusLine(6, string.format("  AP       : %s",          apStr))
+                statusLine(7, string.format("  Fuel     : %d/15",       newFuel))
+            end
+        end
+    end
+
+    local function keyHandler()
+        while true do
+            local _, key = os.pullEvent("key")
+            if key == keys.equals or key == keys.numPadAdd then
+                soundVolume = math.min(3.0, soundVolume + 0.5)
+                cfg.soundVolume = soundVolume
+                saveConfig(cfg)
+                statusLine(5, string.format("  Volume   : %.1f / 3.0", soundVolume))
+            elseif key == keys.minus or key == keys.numPadSubtract then
+                soundVolume = math.max(0.0, soundVolume - 0.5)
+                cfg.soundVolume = soundVolume
+                saveConfig(cfg)
+                statusLine(5, string.format("  Volume   : %.1f / 3.0", soundVolume))
+            end
+        end
+    end
+
+    -- Draw static lines before loops start
+    statusLine(3, string.format("  Speakers : %d found",   #speakers))
+    statusLine(4, string.format("  dfpwm    : %s",         dfpwm and "loaded" or "unavailable"))
+    statusLine(5, string.format("  Volume   : %.1f / 3.0", soundVolume))
+    statusLine(6,  "  AP       : --")
+    statusLine(7,  "  Fuel     : --")
+
+    parallel.waitForAny(receiveLoop, soundLoop, keyHandler, restartListener)
 end
 
 --------------------------------------------------------------------------------
@@ -359,8 +547,20 @@ local function runReadout()
         mwrite(rightMon, 2, 5,
             string.format("FUEL [%s] %d/15", fuelBar(fuelVal, 9), fuelVal), fuelCol)
 
+        local dispThr = d.throttle or 0
+        local dispRev = d.reverse or false
+        if d.autopilot then
+            if d.arrived then
+                dispThr, dispRev = 0, false
+            else
+                local h = d.heading or 180
+                dispThr = math.floor(math.abs(math.cos(math.rad(h))) * 15 + 0.5)
+                dispRev = (h < 90 or h > 270)
+            end
+        end
         mwrite(rightMon, 2, 7,
-            string.format("THR  %d/15%s", d.throttle or 0, d.reverse and "  REV" or ""))
+            string.format("THR  %d/15%s%s",
+                dispThr, dispRev and "  REV" or "", d.autopilot and "  [AP]" or ""))
     end
 
     cls()
@@ -387,7 +587,7 @@ end
 -- Module: Pilot
 --------------------------------------------------------------------------------
 
-local function runPilot(cfg)
+local function runPilot()
     local wheel = peripheral.find("steering_wheel")
     if not wheel then
         cls()
@@ -398,25 +598,11 @@ local function runPilot(cfg)
         return
     end
 
-    local speaker     = peripheral.find("speaker")
-    local soundQueue  = {}
-    local soundVolume = cfg.soundVolume or 1.0
-
-    local lastAutopilot = false
-    local lastArrived   = false
-    local latestSData   = {}
-
-    local ok, dfpwm = pcall(require, "cc.audio.dfpwm")
-    if not ok then
-        dfpwm = nil
-        local ok2
-        ok2, dfpwm = pcall(require, "dfpwm")
-        if not ok2 then dfpwm = nil end
-    end
+    local latestSData = {}
 
     cls()
     header("Pilot Module")
-    footer("[U] Update  [+/-] Volume")
+    footer("[U] Update")
 
     local function pilotLoop()
         while true do
@@ -436,10 +622,9 @@ local function runPilot(cfg)
                 apStr = latestSData.arrived and "  [AP: ARRIVED]" or "  [AP: ON]"
             end
 
-            statusLine(3, string.format("  Wheel  : %+.2f%s", norm, apStr))
-            statusLine(4, string.format("  Left   : %.2f",  left))
-            statusLine(5, string.format("  Right  : %.2f",  right))
-            statusLine(7, string.format("  Volume : %.1f / 3.0", soundVolume))
+            statusLine(3, string.format("  Wheel : %+.2f%s", norm, apStr))
+            statusLine(4, string.format("  Left  : %.2f",  left))
+            statusLine(5, string.format("  Right : %.2f",  right))
 
             sleep(0.05)
         end
@@ -449,63 +634,244 @@ local function runPilot(cfg)
         while true do
             local _, msg = rednet.receive(PROTOCOL)
             if msg and msg.type == "sensor_data" then
-                local newAp  = msg.autopilot or false
-                local newArr = msg.arrived   or false
-                if not lastAutopilot and newAp and not newArr then
-                    soundQueue[#soundQueue + 1] = SOUNDS_PATH .. "autonav_start.dfpwm"
-                elseif lastAutopilot and not lastArrived and newArr then
-                    soundQueue[#soundQueue + 1] = SOUNDS_PATH .. "autonav_stop.dfpwm"
-                end
-                lastAutopilot = newAp
-                lastArrived   = newArr
-                latestSData   = msg
+                latestSData = msg
             end
         end
     end
 
-    local function soundLoop()
-        while true do
-            if #soundQueue > 0 then
-                local path = table.remove(soundQueue, 1)
-                if fs.exists(path) then
-                    local decoder = dfpwm.make_decoder()
-                    local f = fs.open(path, "rb")
-                    while true do
-                        local chunk = f.read(16 * 1024)
-                        if not chunk then break end
-                        local buffer = decoder(chunk)
-                        while not speaker.playAudio(buffer, soundVolume) do
-                            os.pullEvent("speaker_audio_empty")
-                        end
-                    end
-                    f.close()
-                end
+    parallel.waitForAny(pilotLoop, receiveLoop, restartListener)
+end
+
+--------------------------------------------------------------------------------
+-- Module: Portable
+--------------------------------------------------------------------------------
+
+local function runPortable(cfg)
+    local W2, H2 = term.getSize()
+
+    local function pheader()
+        term.setCursorPos(1, 1)
+        if term.isColour() then
+            term.setTextColour(colours.black)
+            term.setBackgroundColour(colours.cyan)
+        end
+        local line = " ANS v" .. VERSION .. " | Portable"
+        term.write(line .. string.rep(" ", math.max(0, W2 - #line)))
+        if term.isColour() then
+            term.setTextColour(colours.white)
+            term.setBackgroundColour(colours.black)
+        end
+    end
+
+    local function pfooter(text)
+        term.setCursorPos(1, H2)
+        if term.isColour() then
+            term.setTextColour(colours.black)
+            term.setBackgroundColour(colours.lightGrey)
+        end
+        local line = " " .. text
+        term.write(line .. string.rep(" ", math.max(0, W2 - #line)))
+        if term.isColour() then
+            term.setTextColour(colours.white)
+            term.setBackgroundColour(colours.black)
+        end
+    end
+
+    local function pline(row, text)
+        term.setCursorPos(1, row)
+        term.clearLine()
+        term.write(text)
+    end
+
+    local function fuelBar(val, width)
+        local filled = math.floor(val / 15 * width + 0.5)
+        return string.rep("=", filled) .. string.rep("-", width - filled)
+    end
+
+    local sData       = {}
+    local navItems    = nil
+    local navMenuOpen = false
+
+    local function redrawMain()
+        if navMenuOpen then return end
+        term.clear()
+        pheader()
+
+        local d        = sData
+        local alt      = d.altitude or 0
+        local vel      = d.velocity or 0
+        local fuel     = d.fuel     or 0
+        local autopilot = d.autopilot or false
+        local arrived   = d.arrived   or false
+
+        local dispThr = d.throttle or 0
+        local dispRev = d.reverse  or false
+        if autopilot then
+            if arrived then
+                dispThr, dispRev = 0, false
             else
-                sleep(0.05)
+                local h = d.heading or 180
+                dispThr = math.floor(math.abs(math.cos(math.rad(h))) * 15 + 0.5)
+                dispRev = (h < 90 or h > 270)
             end
         end
+
+        pline(3, string.format("  ALT  %.1f m", alt))
+        pline(4, string.format("  VEL  %.2f m/s", vel))
+        pline(5, string.format("  THR  %d/15%s%s",
+            dispThr, dispRev and "  REV" or "", autopilot and "  [AP]" or ""))
+        pline(6, string.format("  FUEL [%s] %d/15", fuelBar(fuel, 8), fuel))
+
+        local apStr
+        if not autopilot then
+            apStr = "AP: OFF"
+        elseif arrived then
+            apStr = "AP: ARRIVED"
+        else
+            apStr = string.format("AP: ON - %.0f m", d.distance or 0)
+        end
+        pline(8, "  " .. apStr)
+
+        pfooter("[U] Update  [N] Nav")
     end
 
-    local function keyHandler()
+    local function navMenu()
+        navMenuOpen = true
+        term.clear()
+        pheader()
+        pline(3, "  Fetching items...")
+
+        rednet.broadcast({ type = "nav_item_list_request" }, PROTOCOL)
+
+        local items = nil
+        local deadline = os.clock() + 2
+        while os.clock() < deadline do
+            local _, msg = rednet.receive(PROTOCOL, 0.1)
+            if type(msg) == "table" and msg.type == "nav_item_list" then
+                items = msg.items
+                break
+            end
+        end
+
+        if not items then
+            pline(3, "  No response from Sensor.")
+            pline(4, "  Press any key to return.")
+            os.pullEvent("key")
+            navMenuOpen = false
+            return
+        end
+
+        if #items == 0 then
+            pline(3, "  Barrel is empty.")
+            pline(4, "  Press any key to return.")
+            os.pullEvent("key")
+            navMenuOpen = false
+            return
+        end
+
+        local LIST_TOP2 = 3
+        local LIST_H2   = H2 - LIST_TOP2 - 1
+        local sel       = 1
+        local scroll    = 0
+
+        local function drawList()
+            term.clear()
+            pheader()
+            for row = 1, LIST_H2 do
+                term.setCursorPos(1, LIST_TOP2 + row - 1)
+                term.clearLine()
+                local idx  = row + scroll
+                local item = items[idx]
+                if item then
+                    local isSel = (idx == sel)
+                    if isSel and term.isColour() then
+                        term.setTextColour(colours.black)
+                        term.setBackgroundColour(colours.white)
+                    end
+                    local line = string.format("  %s (%d)", item.displayName, item.count)
+                    term.write(line .. string.rep(" ", math.max(0, W2 - #line)))
+                    if term.isColour() then
+                        term.setTextColour(colours.white)
+                        term.setBackgroundColour(colours.black)
+                    end
+                end
+            end
+            pfooter("[^/v] Select [Enter] Set [Q] Back")
+        end
+
+        drawList()
+
         while true do
             local _, key = os.pullEvent("key")
-            if key == keys.equals or key == keys.numPadAdd then
-                soundVolume = math.min(3.0, soundVolume + 0.5)
-                cfg.soundVolume = soundVolume
-                saveConfig(cfg)
-            elseif key == keys.minus or key == keys.numPadSubtract then
-                soundVolume = math.max(0.0, soundVolume + -0.5)
-                cfg.soundVolume = soundVolume
-                saveConfig(cfg)
+            if key == keys.up then
+                if sel > 1 then
+                    sel = sel - 1
+                    if sel <= scroll then scroll = sel - 1 end
+                    drawList()
+                end
+            elseif key == keys.down then
+                if sel < #items then
+                    sel = sel + 1
+                    if sel > scroll + LIST_H2 then scroll = sel - LIST_H2 end
+                    drawList()
+                end
+            elseif key == keys.enter then
+                local chosen = items[sel]
+                term.clear()
+                pheader()
+                pline(3, "  Setting navigation item...")
+                rednet.broadcast({ type = "nav_item_select", slot = chosen.slot }, PROTOCOL)
+
+                local result = nil
+                local dl2    = os.clock() + 2
+                while os.clock() < dl2 do
+                    local _, msg2 = rednet.receive(PROTOCOL, 0.1)
+                    if type(msg2) == "table" and msg2.type == "nav_item_result" then
+                        result = msg2
+                        break
+                    end
+                end
+
+                if result and result.success then
+                    pline(3, "  Done: " .. chosen.displayName)
+                else
+                    pline(3, "  Failed: " .. (result and result.message or "timeout"))
+                end
+                pline(4, "  Press any key to return.")
+                os.pullEvent("key")
+                break
+            elseif key == keys.q then
+                break
+            end
+        end
+
+        navMenuOpen = false
+        redrawMain()
+    end
+
+    cls()
+    redrawMain()
+
+    local function displayLoop()
+        while true do
+            local _, msg = rednet.receive(PROTOCOL)
+            if type(msg) == "table" and msg.type == "sensor_data" then
+                sData = msg
+                redrawMain()
             end
         end
     end
 
-    if speaker and dfpwm then
-        parallel.waitForAny(pilotLoop, receiveLoop, soundLoop, keyHandler, restartListener)
-    else
-        parallel.waitForAny(pilotLoop, receiveLoop, keyHandler, restartListener)
+    local function navMenuHandler()
+        while true do
+            local _, key = os.pullEvent("key")
+            if key == keys.n and not navMenuOpen then
+                navMenu()
+            end
+        end
     end
+
+    parallel.waitForAny(displayLoop, navMenuHandler, restartListener)
 end
 
 --------------------------------------------------------------------------------
@@ -703,8 +1069,10 @@ cls()
 header("Starting " .. module .. "...")
 sleep(0.3)
 
-if     module == "sensor"  then runSensor()
-elseif module == "readout" then runReadout()
-elseif module == "pilot"   then runPilot(cfg)
-elseif module == "engine"  then runEngine(cfg)
+if     module == "sensor"       then runSensor()
+elseif module == "readout"      then runReadout()
+elseif module == "pilot"        then runPilot()
+elseif module == "engine"       then runEngine(cfg)
+elseif module == "announcement" then runAnnouncement(cfg)
+elseif module == "portable"     then runPortable(cfg)
 end
