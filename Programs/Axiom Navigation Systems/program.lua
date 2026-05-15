@@ -1,7 +1,7 @@
 -- Axiom Navigation Systems v1.0.7
 -- Navigation control system for the AXIOM airship
 
-local VERSION     = "1.0.8"
+local VERSION     = "1.0.9"
 local CONFIG_PATH = "ans_config.json"
 local PROTOCOL    = "axiom_nav"
 
@@ -430,9 +430,10 @@ local function runPilot()
             statusLine(3, string.format("  Wheel : %+.2f%s", norm, apStr))
             statusLine(4, string.format("  Left  : %.2f",  left))
             statusLine(5, string.format("  Right : %.2f",  right))
-            statusLine(7, string.format("  Speaker : %s   dfpwm: %s",
-                speaker and "found" or "NOT FOUND",
-                dfpwm   and "loaded" or "unavailable"))
+            statusLine(7, string.format("  Speaker : %s",
+                speaker and "found" or "NOT FOUND"))
+            statusLine(8, string.format("  dfpwm   : %s",
+                dfpwm and "loaded" or ("unavail: " .. (dfpwmErr or "?"):sub(1, 25))))
             statusLine(8, string.format("  start.dfpwm : %s",
                 fs.exists(SOUNDS_PATH .. "autonav_start.dfpwm") and "found" or "NOT FOUND"))
             statusLine(9, string.format("  stop.dfpwm  : %s",
@@ -460,8 +461,15 @@ local function runPilot()
         end
     end
 
+    local dfpwmErr
     local ok, dfpwm = pcall(require, "cc.audio.dfpwm")
-    if not ok then dfpwm = nil end
+    if not ok then
+        dfpwmErr = tostring(dfpwm)
+        dfpwm = nil
+        local ok2
+        ok2, dfpwm = pcall(require, "dfpwm")
+        if not ok2 then dfpwm = nil end
+    end
 
     local function soundLoop()
         while true do
