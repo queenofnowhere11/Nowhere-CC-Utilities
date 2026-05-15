@@ -1,7 +1,7 @@
 -- Axiom Navigation Systems v1.0.7
 -- Navigation control system for the AXIOM airship
 
-local VERSION     = "1.1.4"
+local VERSION     = "1.1.5"
 local CONFIG_PATH = "ans_config.json"
 local PROTOCOL    = "axiom_nav"
 
@@ -336,7 +336,17 @@ local function runSensor()
                         end
                         barrel.pushItems(navTableName, msg.slot, 1, 1)
                     end)
-                    local errMsg = ok and "OK" or (tostring(err):match(":%d+: (.+)$") or tostring(err))
+                    local errMsg
+                    if ok then
+                        errMsg = "OK"
+                    else
+                        local raw = tostring(err):match(":%d+: (.+)$") or tostring(err)
+                        if raw:find("list") or raw:find("pushItems") then
+                            errMsg = "nav table has no inventory API"
+                        else
+                            errMsg = raw
+                        end
+                    end
                     rednet.broadcast({
                         type    = "nav_item_result",
                         success = ok,
@@ -824,12 +834,14 @@ local function runPortable(cfg)
                 if result and result.success then
                     pline(3, "  Done:")
                     pline(4, "  " .. chosen.displayName)
+                    pline(5, "")
                 else
                     local errMsg = result and result.message or "timeout"
                     pline(3, "  Failed:")
                     pline(4, "  " .. errMsg:sub(1, W2 - 2))
+                    pline(5, "  " .. errMsg:sub(W2 - 1))
                 end
-                pline(5, "  Press any key.")
+                pline(6, "  Press any key.")
                 os.pullEvent("key")
                 break
             elseif key == keys.q then
