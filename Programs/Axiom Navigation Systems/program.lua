@@ -1,7 +1,7 @@
 -- Axiom Navigation Systems v1.0.7
 -- Navigation control system for the AXIOM airship
 
-local VERSION     = "1.1.5"
+local VERSION     = "1.1.6"
 local CONFIG_PATH = "ans_config.json"
 local PROTOCOL    = "axiom_nav"
 
@@ -256,9 +256,17 @@ local function runSensor()
         barrelSlots = ok and sz or "?"
     end
 
+    -- Show navTable methods for diagnostics
+    local navMethods = peripheral.getMethods(navTableName) or {}
+    local navMethodStr = table.concat(navMethods, ", ")
+
     cls()
     header("Sensor Module")
     footer("[U] Restart All")
+
+    statusLine(10, "  NavTable methods:")
+    statusLine(11, "  " .. navMethodStr:sub(1, W - 2))
+    statusLine(12, "  " .. navMethodStr:sub(W - 1, (W - 2) * 2))
 
     local function broadcastLoop()
         while true do
