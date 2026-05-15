@@ -1,7 +1,7 @@
 -- Axiom Navigation Systems v1.0.7
 -- Navigation control system for the AXIOM airship
 
-local VERSION     = "1.1.3"
+local VERSION     = "1.1.4"
 local CONFIG_PATH = "ans_config.json"
 local PROTOCOL    = "axiom_nav"
 
@@ -822,11 +822,14 @@ local function runPortable(cfg)
                 end
 
                 if result and result.success then
-                    pline(3, "  Done: " .. chosen.displayName)
+                    pline(3, "  Done:")
+                    pline(4, "  " .. chosen.displayName)
                 else
-                    pline(3, "  Failed: " .. (result and result.message or "timeout"))
+                    local errMsg = result and result.message or "timeout"
+                    pline(3, "  Failed:")
+                    pline(4, "  " .. errMsg:sub(1, W2 - 2))
                 end
-                pline(4, "  Press any key to return.")
+                pline(5, "  Press any key.")
                 os.pullEvent("key")
                 break
             elseif key == keys.q then
