@@ -31,7 +31,7 @@
       "files": [
         { "src": "Programs/Axiom Navigation Systems/program.lua", "dest": "program.lua" },
         { "src": "Programs/Axiom Navigation Systems/sounds/autonav_start.dfpwm", "dest": "sounds/autonav_start.dfpwm" },
-        { "src": "Programs/Axiom Navigation Systems/sounds/autonav_done.dfpwm",  "dest": "sounds/autonav_done.dfpwm"  }
+        { "src": "Programs/Axiom Navigation Systems/sounds/autonav_stop.dfpwm",  "dest": "sounds/autonav_stop.dfpwm"  }
       ]
     }
   ]
