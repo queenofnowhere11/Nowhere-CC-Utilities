@@ -1,7 +1,7 @@
 -- Axiom Navigation Systems v1.0.7
 -- Navigation control system for the AXIOM airship
 
-local VERSION     = "1.1.0"
+local VERSION     = "1.1.1"
 local CONFIG_PATH = "ans_config.json"
 local PROTOCOL    = "axiom_nav"
 
@@ -236,9 +236,9 @@ local function runSensor()
     local barrelName,   barrel   = nil, nil
     for _, name in ipairs(peripheral.getNames()) do
         local t = peripheral.getType(name)
-        if t == "simulated:navigation_table" then
+        if t and t:find("navigation_table") then
             navTableName, navTable = name, peripheral.wrap(name)
-        elseif t == "sophisticatedstorage:barrel" then
+        elseif t and t:find("barrel") then
             barrelName, barrel = name, peripheral.wrap(name)
         end
     end
