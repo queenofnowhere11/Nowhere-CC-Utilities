@@ -1,7 +1,7 @@
 -- Axiom Navigation Systems v1.0.7
 -- Navigation control system for the AXIOM airship
 
-local VERSION     = "1.0.7"
+local VERSION     = "1.0.8"
 local CONFIG_PATH = "ans_config.json"
 local PROTOCOL    = "axiom_nav"
 
@@ -430,6 +430,13 @@ local function runPilot()
             statusLine(3, string.format("  Wheel : %+.2f%s", norm, apStr))
             statusLine(4, string.format("  Left  : %.2f",  left))
             statusLine(5, string.format("  Right : %.2f",  right))
+            statusLine(7, string.format("  Speaker : %s   dfpwm: %s",
+                speaker and "found" or "NOT FOUND",
+                dfpwm   and "loaded" or "unavailable"))
+            statusLine(8, string.format("  start.dfpwm : %s",
+                fs.exists(SOUNDS_PATH .. "autonav_start.dfpwm") and "found" or "NOT FOUND"))
+            statusLine(9, string.format("  stop.dfpwm  : %s",
+                fs.exists(SOUNDS_PATH .. "autonav_stop.dfpwm")  and "found" or "NOT FOUND"))
 
             sleep(0.05)
         end
