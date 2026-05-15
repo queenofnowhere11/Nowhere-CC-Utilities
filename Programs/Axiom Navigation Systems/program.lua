@@ -1,7 +1,7 @@
 -- Axiom Navigation Systems v1.0.7
 -- Navigation control system for the AXIOM airship
 
-local VERSION     = "1.1.1"
+local VERSION     = "1.1.2"
 local CONFIG_PATH = "ans_config.json"
 local PROTOCOL    = "axiom_nav"
 
@@ -33,18 +33,6 @@ local function saveConfig(cfg)
     local f = fs.open(CONFIG_PATH, "w")
     f.write(textutils.serialiseJSON(cfg))
     f.close()
-end
-
---------------------------------------------------------------------------------
--- Vessel check
---------------------------------------------------------------------------------
-
-local vesselName = sublevel and sublevel.getName()
-if vesselName ~= "AXIOM" then
-    print("ERROR: This program only runs on the AXIOM.")
-    print("       Vessel name: " .. tostring(vesselName))
-    sleep(5)
-    return
 end
 
 --------------------------------------------------------------------------------
@@ -1064,6 +1052,20 @@ if not openWirelessModem() then
 end
 
 local module = getModule(cfg)
+
+-- Non-portable modules require the AXIOM vessel
+if module ~= "portable" then
+    local vesselName = sublevel and sublevel.getName()
+    if vesselName ~= "AXIOM" then
+        cls()
+        header("Error")
+        term.setCursorPos(1, 3)
+        printError("  This module requires the AXIOM vessel.")
+        print("  Vessel: " .. tostring(vesselName))
+        sleep(5)
+        return
+    end
+end
 
 cls()
 header("Starting " .. module .. "...")
