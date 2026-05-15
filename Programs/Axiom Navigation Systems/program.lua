@@ -1,7 +1,7 @@
 -- Axiom Navigation Systems v1.0.7
 -- Navigation control system for the AXIOM airship
 
-local VERSION     = "1.1.8"
+local VERSION     = "1.1.9"
 local CONFIG_PATH = "ans_config.json"
 local PROTOCOL    = "axiom_nav"
 
@@ -226,7 +226,7 @@ local function runSensor()
         local t = peripheral.getType(name)
         if t and t:find("navigation_table") then
             navTableName, navTable = name, peripheral.wrap(name)
-        elseif t and t:find("barrel") then
+        elseif t == "inventory" or (t and t:find("chest")) then
             barrelName, barrel = name, peripheral.wrap(name)
         end
     end
@@ -302,8 +302,8 @@ local function runSensor()
             statusLine(7, string.format("  Heading  : %.1f deg", heading))
             statusLine(8, string.format("  Fuel     : %d/15", fuel))
             statusLine(9, barrel
-                and string.format("  Barrel   : found (%s slots)", tostring(barrelSlots))
-                or  "  Barrel   : not found")
+                and string.format("  Storage  : found (%s slots)", tostring(barrelSlots))
+                or  "  Storage  : not found")
 
             sleep(0.05)
         end
