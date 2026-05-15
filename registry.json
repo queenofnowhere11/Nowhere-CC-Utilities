@@ -26,10 +26,12 @@
       "id": "axiom-navigator",
       "name": "Axiom Navigation Systems",
       "description": "Control systems for the Axiom airship",
-      "version": "1.0.9",
+      "version": "1.0.10",
       "main": "program.lua",
       "files": [
-        { "src": "Programs/Axiom Navigation Systems/program.lua", "dest": "program.lua" }
+        { "src": "Programs/Axiom Navigation Systems/program.lua", "dest": "program.lua" },
+        { "src": "Programs/Axiom Navigation Systems/sounds/autonav_start.dfpwm", "dest": "sounds/autonav_start.dfpwm" },
+        { "src": "Programs/Axiom Navigation Systems/sounds/autonav_done.dfpwm",  "dest": "sounds/autonav_done.dfpwm"  }
       ]
     }
   ]
