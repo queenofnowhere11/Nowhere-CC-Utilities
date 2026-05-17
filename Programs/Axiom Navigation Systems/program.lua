@@ -1,7 +1,7 @@
 -- Axiom Navigation Systems v1.0.7
 -- Navigation control system for the AXIOM airship
 
-local VERSION     = "1.2.1"
+local VERSION     = "1.3.0"
 local CONFIG_PATH = "ans_config.json"
 local PROTOCOL    = "axiom_nav"
 
@@ -12,6 +12,10 @@ local SOUNDS_PATH = fs.getDir(shell.getRunningProgram()) .. "/sounds/"
 -- AutoNav arrival: horizontal distance threshold in blocks
 local ARRIVAL_RADIUS = 15
 
+-- PID control loop
+local LOOP_INTERVAL  = 0.1
+local INTEGRAL_CLAMP = 100
+
 -- Redstone Link Bridge frequencies
 local THROTTLE_F1 = "everycomp:tf/biomeswevegone/hollow_ebony_log"
 local THROTTLE_F2 = "simulated:throttle_lever"
@@ -19,6 +23,16 @@ local REVERSE_F1  = "everycomp:tf/biomeswevegone/hollow_ebony_log"
 local REVERSE_F2  = "minecraft:lever"
 local FUEL_F1     = "everycomp:tf/biomeswevegone/hollow_ebony_log"
 local FUEL_F2     = "create_connected:fluid_vessel"
+
+-- Height PID: target signal input (inverted: 0=maxHeight, 15=minHeight)
+local HEIGHT_F1 = "everycomp:tf/biomeswevegone/hollow_ebony_log"
+local HEIGHT_F2 = "dndecor:stepped_lever"
+
+-- Burner outputs
+local FRONT_F1 = "everycomp:tf/biomeswevegone/hollow_ebony_log"  -- nose up
+local FRONT_F2 = "createdeco:decal_up"
+local BACK_F1  = "everycomp:tf/biomeswevegone/hollow_ebony_log"  -- nose down
+local BACK_F2  = "createdeco:decal_down"
 
 --------------------------------------------------------------------------------
 -- Config
@@ -36,6 +50,37 @@ local function saveConfig(cfg)
     local f = fs.open(CONFIG_PATH, "w")
     f.write(textutils.serialiseJSON(cfg))
     f.close()
+end
+
+--------------------------------------------------------------------------------
+-- PID helpers
+--------------------------------------------------------------------------------
+
+local function clamp(v, lo, hi)
+    return math.max(lo, math.min(hi, v))
+end
+
+local function ffOutput(targetY, equilMap)
+    if not equilMap or #equilMap < 2 then return 0 end
+    table.sort(equilMap, function(a, b) return a.height < b.height end)
+    local n = #equilMap
+    if targetY <= equilMap[1].height then
+        local slope = (equilMap[2].output - equilMap[1].output) /
+                      (equilMap[2].height - equilMap[1].height)
+        return clamp(equilMap[1].output + slope * (targetY - equilMap[1].height), 0, 15)
+    end
+    if targetY >= equilMap[n].height then
+        local slope = (equilMap[n].output - equilMap[n-1].output) /
+                      (equilMap[n].height - equilMap[n-1].height)
+        return clamp(equilMap[n].output + slope * (targetY - equilMap[n].height), 0, 15)
+    end
+    for i = 1, n - 1 do
+        if equilMap[i].height <= targetY and equilMap[i+1].height >= targetY then
+            local t = (targetY - equilMap[i].height) / (equilMap[i+1].height - equilMap[i].height)
+            return equilMap[i].output + t * (equilMap[i+1].output - equilMap[i].output)
+        end
+    end
+    return 0
 end
 
 --------------------------------------------------------------------------------
@@ -105,7 +150,7 @@ end
 --------------------------------------------------------------------------------
 
 local MODULES = {
-    { id = "sensor",       label = "Sensor",   desc = "Reads sensors, broadcasts to network"         },
+    { id = "control",      label = "Control",  desc = "PID height/tilt control + sensor broadcast"   },
     { id = "readout",      label = "Readout",  desc = "Displays flight data on cockpit monitors"      },
     { id = "pilot",        label = "Pilot",    desc = "Reads steering wheel, broadcasts turn values"  },
     { id = "engine",       label = "Engine",   desc = "Controls left and right engine outputs"        },
@@ -207,24 +252,480 @@ local function restartListener()
 end
 
 --------------------------------------------------------------------------------
--- Module: Sensor
+-- Module: Control (height + tilt PID + sensor broadcast)
 --------------------------------------------------------------------------------
 
-local function runSensor()
+local function runHeightCalibration(cfg, bridge, altSensor)
+    local MAX_RELAY_DURATION = 300
+    local MIN_CYCLES         = 5
+    local DEADBAND           = 0.5
+    local targetY = (cfg.minHeight + cfg.maxHeight) / 2
+
+    local function setBurners(v)
+        bridge.sendLinkSignal(FRONT_F1, FRONT_F2, v)
+        bridge.sendLinkSignal(BACK_F1,  BACK_F2,  v)
+    end
+
+    -- Phase A: Instructions
+    cls()
+    header("Height Calibration")
+    term.setCursorPos(1, 3)
+    print("  Relay feedback test (Ziegler-Nichols method)")
+    print("")
+    print("  Phase 1: Sweeps output levels to find the")
+    print("           equilibrium bracket for target height.")
+    print("           The airship will move -- allow space.")
+    print("")
+    print("  Phase 2: Oscillates around target height for")
+    print("           up to " .. MAX_RELAY_DURATION .. " s to measure response.")
+    print("")
+    print("  Test height: " .. string.format("%.1f", targetY))
+    print("")
+    footer("[Enter] Begin  [Q] Cancel")
+    while true do
+        local _, key = os.pullEvent("key")
+        if key == keys.enter then break
+        elseif key == keys.q then return nil end
+    end
+
+    -- Phase B: Bracket search
+    local relayLow   = nil
+    local relayHigh  = nil
+    local abortFlag  = false
+    local searchFail = false
+    local equilData  = {}
+
+    local function bracketSearch()
+        local output    = 8
+        local prevEquil = nil
+        local prevOut   = nil
+        local searchDir = nil
+
+        while not abortFlag do
+            setBurners(output)
+            local stableCount = 0
+            while stableCount < 100 and not abortFlag do
+                local currentY  = altSensor.getHeight()
+                local velocityY = altSensor.getVerticalSpeed()
+                if math.abs(velocityY) < 0.5 then
+                    stableCount = stableCount + 1
+                else
+                    stableCount = 0
+                end
+                if currentY < cfg.minHeight - 10 or currentY > cfg.maxHeight + 10 then
+                    abortFlag = true; break
+                end
+                cls()
+                header("Finding Hover Point...")
+                statusLine(3, string.format("  Test output: %d/15", output))
+                statusLine(4, string.format("  Current alt: %.2f m", currentY))
+                statusLine(5, string.format("  Velocity:    %.2f m/s", velocityY))
+                statusLine(6, string.format("  Target:      %.2f m", targetY))
+                statusLine(7, string.format("  Stable:      %.0f/10 s", stableCount * LOOP_INTERVAL))
+                footer("[Q] Abort")
+                sleep(LOOP_INTERVAL)
+            end
+            if abortFlag then break end
+
+            local equilY = altSensor.getHeight()
+            equilData[#equilData + 1] = { output = output, height = equilY }
+
+            if searchDir == nil then
+                searchDir = equilY > targetY and -1 or 1
+            end
+
+            if prevEquil ~= nil then
+                local crossed = (prevEquil < targetY and equilY >= targetY)
+                             or (prevEquil > targetY and equilY <= targetY)
+                if crossed then
+                    if prevEquil < targetY then
+                        relayLow = prevOut; relayHigh = output
+                    else
+                        relayLow = output;  relayHigh = prevOut
+                    end
+                    break
+                end
+            end
+
+            prevEquil = equilY
+            prevOut   = output
+            output    = output + searchDir
+            if output < 0 or output > 15 then searchFail = true; break end
+        end
+    end
+
+    local function abortListener1()
+        while not abortFlag do
+            local _, key = os.pullEvent("key")
+            if key == keys.q then abortFlag = true end
+        end
+    end
+
+    parallel.waitForAny(bracketSearch, abortListener1)
+    setBurners(0)
+
+    if #equilData >= 2 then
+        cfg.equilMap = equilData
+        saveConfig(cfg)
+    end
+
+    local function failScreen(msg)
+        cls(); header("Calibration Failed")
+        term.setCursorPos(1, 3)
+        print(msg)
+        footer("Press any key to return")
+        os.pullEvent("key")
+    end
+
+    if abortFlag  then return nil end
+    if searchFail then
+        failScreen("  Target height unreachable.\n  Adjust min/max height range.")
+        return nil
+    end
+
+    local RELAY_AMP = (relayHigh - relayLow) / 2
+
+    -- Phase C: Relay oscillation
+    local startTime  = os.epoch("utc") / 1000
+    local peaks      = {}
+    local troughs    = {}
+    local prevY      = nil
+    local direction  = 0
+    local relayOut   = relayHigh
+    local calibAbort = false
+    local safetyFail = false
+
+    local function relayLoop()
+        while true do
+            local elapsed  = os.epoch("utc") / 1000 - startTime
+            local currentY = altSensor.getHeight()
+            if currentY < targetY - 60 or currentY > targetY + 60 then
+                safetyFail = true; break
+            end
+            relayOut = (currentY < targetY) and relayHigh or relayLow
+            setBurners(relayOut)
+            if prevY ~= nil then
+                if direction == 0 then
+                    if     currentY > prevY + 0.01 then direction =  1
+                    elseif currentY < prevY - 0.01 then direction = -1
+                    end
+                elseif direction == 1 and currentY < prevY - 0.01 then
+                    if prevY > targetY + DEADBAND then
+                        peaks[#peaks + 1] = { height = prevY, time = elapsed }
+                    end
+                    direction = -1
+                elseif direction == -1 and currentY > prevY + 0.01 then
+                    if prevY < targetY - DEADBAND then
+                        troughs[#troughs + 1] = { height = prevY, time = elapsed }
+                    end
+                    direction = 1
+                end
+            end
+            prevY = currentY
+            local cycles = math.min(#peaks, #troughs)
+            cls(); header("Calibrating Height...")
+            statusLine(3, string.format("  Current alt:    %.2f m", currentY))
+            statusLine(4, string.format("  Target alt:     %.2f m", targetY))
+            statusLine(5, string.format("  Relay output:   %d/15  (%d/%d)", relayOut, relayLow, relayHigh))
+            statusLine(6, string.format("  Cycles:         %d/%d", cycles, MIN_CYCLES))
+            statusLine(7, string.format("  Time remaining: %.0f s", MAX_RELAY_DURATION - elapsed))
+            footer("[Q] Abort")
+            if cycles >= MIN_CYCLES then break end
+            if elapsed >= MAX_RELAY_DURATION then break end
+            sleep(LOOP_INTERVAL)
+        end
+    end
+
+    local function abortListener2()
+        while not calibAbort do
+            local _, key = os.pullEvent("key")
+            if key == keys.q then calibAbort = true end
+        end
+    end
+
+    parallel.waitForAny(relayLoop, abortListener2)
+    setBurners(0)
+
+    if calibAbort  then return nil end
+    if safetyFail  then failScreen("  Airship drifted > 60 m from test height."); return nil end
+
+    local cycles = math.min(#peaks, #troughs)
+    if cycles < MIN_CYCLES then
+        failScreen("  Not enough oscillation (" .. cycles .. "/" .. MIN_CYCLES .. " cycles).\n  Check burner connection.")
+        return nil
+    end
+
+    -- Phase D: Analysis
+    local peakSum, troughSum = 0, 0
+    for _, p in ipairs(peaks)   do peakSum   = peakSum   + p.height end
+    for _, t in ipairs(troughs) do troughSum = troughSum + t.height end
+    local a = (peakSum / #peaks - troughSum / #troughs) / 2
+    local periodSum = 0
+    for i = 2, #peaks do periodSum = periodSum + (peaks[i].time - peaks[i-1].time) end
+    local Tu = periodSum / (#peaks - 1)
+    if a < 0.1 then
+        failScreen("  Amplitude too small (a=" .. string.format("%.3f", a) .. ").")
+        return nil
+    end
+    local Ku = (4 / math.pi) * RELAY_AMP / a
+
+    local options = {
+        { label = "Classic     ", kp = 0.6  * Ku, ki = 1.2  * Ku / Tu, kd = 0.075 * Ku * Tu },
+        { label = "Conservative", kp = 0.33 * Ku, ki = 0.66 * Ku / Tu, kd = 0.11  * Ku * Tu },
+    }
+    for _, o in ipairs(options) do
+        o.kp = clamp(o.kp, 0, 100)
+        o.ki = clamp(o.ki, 0, 100)
+        o.kd = clamp(o.kd, 0, 100)
+    end
+
+    -- Phase E: Results
+    local sel = 1
+    while true do
+        cls(); header("Height Cal. Results")
+        term.setCursorPos(1, 3)
+        print(string.format("  Ku=%.3f  Tu=%.2fs  Amplitude=%.2f", Ku, Tu, a))
+        print(string.format("  Relay: %d / %d", relayLow, relayHigh))
+        print("")
+        for i, opt in ipairs(options) do
+            term.setCursorPos(1, 6 + (i - 1) * 2)
+            local line = string.format("  [%d] %s  Kp=%.3f  Ki=%.4f  Kd=%.3f",
+                i, opt.label, opt.kp, opt.ki, opt.kd)
+            if sel == i and term.isColour() then
+                term.setTextColour(colours.black)
+                term.setBackgroundColour(colours.white)
+            end
+            term.write(line)
+            if term.isColour() then
+                term.setTextColour(colours.white)
+                term.setBackgroundColour(colours.black)
+            end
+        end
+        footer("[1/2] Select  [Enter] Apply  [Q] Discard")
+        local _, key = os.pullEvent("key")
+        if     key == keys.one                    then sel = 1
+        elseif key == keys.two                    then sel = 2
+        elseif key == keys.up or key == keys.down then sel = sel == 1 and 2 or 1
+        elseif key == keys.enter then
+            cfg.hKp = options[sel].kp
+            cfg.hKi = options[sel].ki
+            cfg.hKd = options[sel].kd
+            saveConfig(cfg)
+            return cfg
+        elseif key == keys.q then
+            return nil
+        end
+    end
+end
+
+local function runTiltCalibration(cfg, bridge, gimbal)
+    local MAX_RELAY_DURATION = 120
+    local MIN_CYCLES         = 5
+    local DEADBAND           = 0.3
+    local TILT_RELAY_AMP     = 4.0
+
+    if not cfg.equilMap or #cfg.equilMap < 2 then
+        cls(); header("Tilt Calibration")
+        term.setCursorPos(1, 3)
+        printError("  Run height calibration first.")
+        print("  equilMap needed to set base height output.")
+        sleep(4)
+        return nil
+    end
+
+    local midH    = (cfg.minHeight + cfg.maxHeight) / 2
+    local equilOut = ffOutput(midH, cfg.equilMap)
+
+    local function applyRelay(r)
+        local f = clamp(math.floor(equilOut + r + 0.5), 0, 15)
+        local b = clamp(math.floor(equilOut - r + 0.5), 0, 15)
+        bridge.sendLinkSignal(FRONT_F1, FRONT_F2, f)
+        bridge.sendLinkSignal(BACK_F1,  BACK_F2,  b)
+    end
+
+    local function zeroOut()
+        bridge.sendLinkSignal(FRONT_F1, FRONT_F2, 0)
+        bridge.sendLinkSignal(BACK_F1,  BACK_F2,  0)
+    end
+
+    -- Phase A: Instructions
+    cls(); header("Tilt Calibration")
+    term.setCursorPos(1, 3)
+    print("  Relay feedback test for pitch axis.")
+    print("")
+    print("  Holds base height output and oscillates")
+    print("  front/back burners to induce pitch cycles.")
+    print("")
+    print("  Base height output: " .. string.format("%.1f/15", equilOut))
+    print("  Relay amplitude:    +/- " .. TILT_RELAY_AMP)
+    print("")
+    footer("[Enter] Begin  [Q] Cancel")
+    while true do
+        local _, key = os.pullEvent("key")
+        if key == keys.enter then break
+        elseif key == keys.q then return nil end
+    end
+
+    -- Phase C: Relay oscillation (no bracket search needed for tilt)
+    local startTime  = os.epoch("utc") / 1000
+    local peaks      = {}
+    local troughs    = {}
+    local prevPitch  = nil
+    local direction  = 0
+    local tiltRelay  = TILT_RELAY_AMP
+    local calibAbort = false
+
+    local function relayLoop()
+        while true do
+            local elapsed = os.epoch("utc") / 1000 - startTime
+            local angles  = gimbal.getAngles()
+            local pitch   = angles.pitch
+
+            tiltRelay = (pitch < 0) and TILT_RELAY_AMP or -TILT_RELAY_AMP
+            applyRelay(tiltRelay)
+
+            if prevPitch ~= nil then
+                if direction == 0 then
+                    if     pitch > prevPitch + 0.01 then direction =  1
+                    elseif pitch < prevPitch - 0.01 then direction = -1
+                    end
+                elseif direction == 1 and pitch < prevPitch - 0.01 then
+                    if prevPitch > DEADBAND then
+                        peaks[#peaks + 1] = { value = prevPitch, time = elapsed }
+                    end
+                    direction = -1
+                elseif direction == -1 and pitch > prevPitch + 0.01 then
+                    if prevPitch < -DEADBAND then
+                        troughs[#troughs + 1] = { value = prevPitch, time = elapsed }
+                    end
+                    direction = 1
+                end
+            end
+            prevPitch = pitch
+
+            local cycles = math.min(#peaks, #troughs)
+            cls(); header("Calibrating Tilt...")
+            statusLine(3, string.format("  Pitch:          %+.2f deg", pitch))
+            statusLine(4, string.format("  Relay:          %+.1f", tiltRelay))
+            statusLine(5, string.format("  Front/Back:     %d / %d",
+                clamp(math.floor(equilOut + tiltRelay + 0.5), 0, 15),
+                clamp(math.floor(equilOut - tiltRelay + 0.5), 0, 15)))
+            statusLine(6, string.format("  Cycles:         %d/%d", cycles, MIN_CYCLES))
+            statusLine(7, string.format("  Time remaining: %.0f s", MAX_RELAY_DURATION - elapsed))
+            footer("[Q] Abort")
+
+            if cycles >= MIN_CYCLES then break end
+            if elapsed >= MAX_RELAY_DURATION then break end
+            sleep(LOOP_INTERVAL)
+        end
+    end
+
+    local function abortListener()
+        while not calibAbort do
+            local _, key = os.pullEvent("key")
+            if key == keys.q then calibAbort = true end
+        end
+    end
+
+    parallel.waitForAny(relayLoop, abortListener)
+    zeroOut()
+
+    if calibAbort then return nil end
+
+    local cycles = math.min(#peaks, #troughs)
+    if cycles < MIN_CYCLES then
+        cls(); header("Tilt Cal. Failed")
+        term.setCursorPos(1, 3)
+        print("  Not enough oscillation (" .. cycles .. "/" .. MIN_CYCLES .. " cycles).")
+        print("  Ensure gimbal sensor is attached.")
+        footer("Press any key")
+        os.pullEvent("key")
+        return nil
+    end
+
+    -- Phase D: Analysis
+    local peakSum, troughSum = 0, 0
+    for _, p in ipairs(peaks)   do peakSum   = peakSum   + p.value end
+    for _, t in ipairs(troughs) do troughSum = troughSum + t.value end
+    local a = (peakSum / #peaks - troughSum / #troughs) / 2
+    local periodSum = 0
+    for i = 2, #peaks do periodSum = periodSum + (peaks[i].time - peaks[i-1].time) end
+    local Tu = periodSum / (#peaks - 1)
+    if a < 0.05 then
+        cls(); header("Tilt Cal. Failed")
+        term.setCursorPos(1, 3)
+        print("  Amplitude too small (a=" .. string.format("%.3f", a) .. ").")
+        footer("Press any key")
+        os.pullEvent("key")
+        return nil
+    end
+    local Ku = (4 / math.pi) * TILT_RELAY_AMP / a
+
+    local options = {
+        { label = "Classic     ", kp = 0.6  * Ku, ki = 1.2  * Ku / Tu, kd = 0.075 * Ku * Tu },
+        { label = "Conservative", kp = 0.33 * Ku, ki = 0.66 * Ku / Tu, kd = 0.11  * Ku * Tu },
+    }
+    for _, o in ipairs(options) do
+        o.kp = clamp(o.kp, 0, 100)
+        o.ki = clamp(o.ki, 0, 100)
+        o.kd = clamp(o.kd, 0, 100)
+    end
+
+    -- Phase E: Results
+    local sel = 1
+    while true do
+        cls(); header("Tilt Cal. Results")
+        term.setCursorPos(1, 3)
+        print(string.format("  Ku=%.3f  Tu=%.2fs  Amplitude=%.2f deg", Ku, Tu, a))
+        print("")
+        for i, opt in ipairs(options) do
+            term.setCursorPos(1, 5 + (i - 1) * 2)
+            local line = string.format("  [%d] %s  Kp=%.3f  Ki=%.4f  Kd=%.3f",
+                i, opt.label, opt.kp, opt.ki, opt.kd)
+            if sel == i and term.isColour() then
+                term.setTextColour(colours.black)
+                term.setBackgroundColour(colours.white)
+            end
+            term.write(line)
+            if term.isColour() then
+                term.setTextColour(colours.white)
+                term.setBackgroundColour(colours.black)
+            end
+        end
+        footer("[1/2] Select  [Enter] Apply  [Q] Discard")
+        local _, key = os.pullEvent("key")
+        if     key == keys.one                    then sel = 1
+        elseif key == keys.two                    then sel = 2
+        elseif key == keys.up or key == keys.down then sel = sel == 1 and 2 or 1
+        elseif key == keys.enter then
+            cfg.tKp = options[sel].kp
+            cfg.tKi = options[sel].ki
+            cfg.tKd = options[sel].kd
+            saveConfig(cfg)
+            return cfg
+        elseif key == keys.q then
+            return nil
+        end
+    end
+end
+
+local function runControl(cfg)
     local bridge    = peripheral.find("redstone_link_bridge")
     local altSensor = peripheral.find("altitude_sensor")
     local velSensor = peripheral.find("velocity_sensor")
     local navTable  = peripheral.find("navigation_table")
+    local gimbal    = peripheral.find("gimbal_sensor")
 
     local missing = {}
     if not bridge    then missing[#missing+1] = "redstone_link_bridge" end
     if not altSensor then missing[#missing+1] = "altitude_sensor"      end
     if not velSensor then missing[#missing+1] = "velocity_sensor"      end
     if not navTable  then missing[#missing+1] = "navigation_table"     end
+    if not gimbal    then missing[#missing+1] = "gimbal_sensor"        end
 
     if #missing > 0 then
         cls()
-        header("Sensor Module - ERROR")
+        header("Control Module - ERROR")
         term.setCursorPos(1, 3)
         print("  Missing peripherals:")
         for _, name in ipairs(missing) do
@@ -234,18 +735,66 @@ local function runSensor()
         return
     end
 
-    cls()
-    header("Sensor Module")
-    footer("[U] Restart All")
+    local function runSetup()
+        cls(); header("Control Module Setup")
+        term.setCursorPos(1, 3)
+        local function prompt(label, default)
+            term.write(label .. " [" .. tostring(default) .. "]: ")
+            local s = read()
+            local n = tonumber(s)
+            return (s == "" and default) or (n ~= nil and n) or default
+        end
+        print("  -- Height Range --")
+        cfg.minHeight = prompt("  Min height", cfg.minHeight or 60)
+        cfg.maxHeight = prompt("  Max height", cfg.maxHeight or 180)
+        cfg.hKp = cfg.hKp or 2.0;  cfg.hKi = cfg.hKi or 0.05; cfg.hKd = cfg.hKd or 0.0
+        cfg.tKp = cfg.tKp or 1.0;  cfg.tKi = cfg.tKi or 0.0;  cfg.tKd = cfg.tKd or 0.0
+        cfg.equilMap = cfg.equilMap or {}
+        saveConfig(cfg)
+    end
 
-    local function broadcastLoop()
-        while true do
+    if not cfg.minHeight then runSetup() end
+
+    local hIntegral  = 0
+    local tIntegral  = 0
+    local lastHTarget = nil
+    local prevPitch  = nil
+    local action     = nil
+
+    local function controlLoop()
+        while not action do
+            -- Height PID
+            local altitude  = altSensor.getHeight()
+            local velocityY = altSensor.getVerticalSpeed()
+            local rawSig    = bridge.getLinkSignal(HEIGHT_F1, HEIGHT_F2)
+            local targetH   = cfg.minHeight + (1 - rawSig / 15) * (cfg.maxHeight - cfg.minHeight)
+            if lastHTarget and math.abs(targetH - lastHTarget) > 5 then hIntegral = 0 end
+            lastHTarget = targetH
+            local hErr      = targetH - altitude
+            hIntegral       = clamp(hIntegral + hErr * LOOP_INTERVAL, -INTEGRAL_CLAMP, INTEGRAL_CLAMP)
+            local ff        = ffOutput(targetH, cfg.equilMap)
+            local heightOut = clamp(ff + cfg.hKp * hErr + cfg.hKi * hIntegral + cfg.hKd * (-velocityY), 0, 15)
+
+            -- Tilt PID
+            local angles    = gimbal.getAngles()
+            local pitch     = angles.pitch
+            local pitchRate = prevPitch and ((pitch - prevPitch) / LOOP_INTERVAL) or 0
+            prevPitch = pitch
+            local tErr    = -pitch
+            tIntegral     = clamp(tIntegral + tErr * LOOP_INTERVAL, -INTEGRAL_CLAMP, INTEGRAL_CLAMP)
+            local tiltOut = clamp(cfg.tKp * tErr + cfg.tKi * tIntegral + cfg.tKd * (-pitchRate), -7.5, 7.5)
+
+            -- Combine and output
+            local frontOut = clamp(math.floor(heightOut + tiltOut + 0.5), 0, 15)
+            local backOut  = clamp(math.floor(heightOut - tiltOut + 0.5), 0, 15)
+            bridge.sendLinkSignal(FRONT_F1, FRONT_F2, frontOut)
+            bridge.sendLinkSignal(BACK_F1,  BACK_F2,  backOut)
+
+            -- Read remaining sensors for broadcast
             local throttle  = bridge.getLinkSignal(THROTTLE_F1, THROTTLE_F2)
             local reverse   = bridge.getLinkSignal(REVERSE_F1,  REVERSE_F2) == 15
-            local altitude  = altSensor.getHeight()
             local velocity  = -velSensor.getVelocity()
             local autopilot = navTable.hasTarget()
-            -- getRelativeAngle: 0/360=behind, 90=left, 180=ahead, 270=right
             local heading   = navTable.getRelativeAngle()
             local distance  = autopilot and navTable.getDistanceToTarget() or nil
             local hDistSq   = distance and math.max(0, distance * distance - altitude * altitude)
@@ -253,39 +802,69 @@ local function runSensor()
             local fuel      = bridge.getLinkSignal(FUEL_F1, FUEL_F2)
 
             rednet.broadcast({
-                type      = "sensor_data",
-                throttle  = throttle,
-                reverse   = reverse,
-                altitude  = altitude,
-                velocity  = velocity,
-                autopilot = autopilot,
-                heading   = heading,
-                distance  = distance,
-                arrived   = arrived,
-                fuel      = fuel,
+                type         = "sensor_data",
+                throttle     = throttle,  reverse      = reverse,
+                altitude     = altitude,  velocity     = velocity,
+                autopilot    = autopilot, heading      = heading,
+                distance     = distance,  arrived      = arrived,
+                fuel         = fuel,
+                pitch        = pitch,
+                targetHeight = targetH,
             }, PROTOCOL)
 
-            local apStatus
-            if not autopilot then
-                apStatus = "OFF"
-            elseif arrived then
-                apStatus = "ON - ARRIVED"
-            else
-                apStatus = string.format("ON  (%.0f m)", distance or 0)
-            end
+            local apStatus = not autopilot and "OFF"
+                          or arrived and "ON - ARRIVED"
+                          or string.format("ON (%.0f m)", distance or 0)
 
-            statusLine(3, string.format("  Altitude : %.1f m", altitude))
-            statusLine(4, string.format("  Velocity : %.2f m/s", velocity))
-            statusLine(5, string.format("  Throttle : %d/15%s", throttle, reverse and "  [REVERSE]" or ""))
-            statusLine(6, string.format("  Autopilot: %s", apStatus))
-            statusLine(7, string.format("  Heading  : %.1f deg", heading))
-            statusLine(8, string.format("  Fuel     : %d/15", fuel))
+            statusLine(3,  string.format("  Alt    : %.1f / %.1f m", altitude, targetH))
+            statusLine(4,  string.format("  VelY   : %+.2f m/s", velocityY))
+            statusLine(5,  string.format("  Pitch  : %+.2f deg", pitch))
+            statusLine(6,  string.format("  H PID  : %.1f/15 (err: %+.1f)", heightOut, hErr))
+            statusLine(7,  string.format("  Tilt   : %+.1f (err: %+.2f)", tiltOut, tErr))
+            statusLine(8,  string.format("  Front  : %d/15   Back: %d/15", frontOut, backOut))
+            statusLine(9,  string.format("  AP     : %s", apStatus))
+            statusLine(10, string.format("  Fuel   : %d/15", fuel))
 
-            sleep(0.05)
+            sleep(LOOP_INTERVAL)
         end
     end
 
-    parallel.waitForAny(broadcastLoop, restartListener)
+    local function keyHandler()
+        while not action do
+            local _, key = os.pullEvent("key")
+            if     key == keys.c then action = "calibrateH"
+            elseif key == keys.t then action = "calibrateT"
+            elseif key == keys.r then action = "reconfigure"
+            end
+        end
+    end
+
+    cls()
+    header("Control Module")
+    footer("[U] Restart All  [C] Cal.H  [T] Cal.T  [R] Setup")
+
+    while true do
+        action = nil
+        hIntegral = 0; tIntegral = 0; lastHTarget = nil; prevPitch = nil
+        parallel.waitForAny(controlLoop, keyHandler, restartListener)
+
+        bridge.sendLinkSignal(FRONT_F1, FRONT_F2, 0)
+        bridge.sendLinkSignal(BACK_F1,  BACK_F2,  0)
+
+        if action == "reconfigure" then
+            runSetup()
+        elseif action == "calibrateH" then
+            local result = runHeightCalibration(cfg, bridge, altSensor)
+            if result then cfg = result end
+        elseif action == "calibrateT" then
+            local result = runTiltCalibration(cfg, bridge, gimbal)
+            if result then cfg = result end
+        end
+
+        cls()
+        header("Control Module")
+        footer("[U] Restart All  [C] Cal.H  [T] Cal.T  [R] Setup")
+    end
 end
 
 --------------------------------------------------------------------------------
@@ -776,7 +1355,7 @@ cls()
 header("Starting " .. module .. "...")
 sleep(0.3)
 
-if     module == "sensor"       then runSensor()
+if     module == "control"      then runControl(cfg)
 elseif module == "readout"      then runReadout()
 elseif module == "pilot"        then runPilot()
 elseif module == "engine"       then runEngine(cfg)
