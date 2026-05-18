@@ -1,7 +1,7 @@
 -- Axiom Navigation Systems v1.0.7
 -- Navigation control system for the AXIOM airship
 
-local VERSION     = "1.3.4"
+local VERSION     = "1.3.5"
 local CONFIG_PATH = "ans_config.json"
 local PROTOCOL    = "axiom_nav"
 
@@ -798,9 +798,10 @@ local function runControl(cfg)
             local velocity  = -velSensor.getVelocity()
             local autopilot = navTable.hasTarget()
             local heading   = navTable.getRelativeAngle()
-            local distance  = autopilot and navTable.getDistanceToTarget() or nil
-            local hDistSq   = distance and math.max(0, distance * distance - altitude * altitude)
-            local arrived   = autopilot and hDistSq ~= nil and (hDistSq < ARRIVAL_RADIUS * ARRIVAL_RADIUS)
+            local distance   = autopilot and navTable.getDistanceToTarget() or nil
+            local vertOffset = autopilot and navTable.getVerticalOffsetToTarget() or 0
+            local hDistSq    = distance and math.max(0, distance * distance - vertOffset * vertOffset)
+            local arrived    = autopilot and hDistSq ~= nil and (hDistSq < ARRIVAL_RADIUS * ARRIVAL_RADIUS)
             local fuel      = bridge.getLinkSignal(FUEL_F1, FUEL_F2)
 
             rednet.broadcast({
