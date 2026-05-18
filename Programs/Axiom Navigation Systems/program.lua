@@ -1,7 +1,7 @@
 -- Axiom Navigation Systems v1.0.7
 -- Navigation control system for the AXIOM airship
 
-local VERSION     = "1.3.9"
+local VERSION     = "1.3.10"
 local CONFIG_PATH = "ans_config.json"
 local PROTOCOL    = "axiom_nav"
 
@@ -835,26 +835,81 @@ local function runControl(cfg)
             statusLine(9,  string.format("  AP     : %s", apStatus))
             statusLine(10, string.format("  Fuel   : %d/15", fuel))
 
-            if logActive then
-                if not logHandle then
-                    logHandle = fs.open("ans_log.csv", "w")
-                    logHandle.writeLine("time,rawSig,targetH,altitude,hErr,hIntegral,ff,heightOut,pitch,tErr,tIntegral,tiltMax,tiltOut,frontOut,backOut,velocityY")
-                end
-                logHandle.writeLine(string.format("%.2f,%d,%.2f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%d,%d,%.3f",
-                    os.clock(), rawSig, targetH, altitude, hErr, hIntegral, ff, heightOut,
-                    pitch, tErr, tIntegral, tiltMax, tiltOut, frontOut, backOut, velocityY))
-                logHandle.flush()
-            elseif logHandle then
-                logHandle.close(); logHandle = nil
-            end
-            statusLine(11, logActive and "  [L] LOGGING -> ans_log.csv" or "")
-
             sleep(LOOP_INTERVAL)
         end
     end
 
-    local logActive = false
-    local logHandle = nil
+    local function runDiagnose()
+        local DIAG_SECONDS = 30
+        local f = fs.open("ans_log.csv", "w")
+        if not f then
+            cls(); header("Diagnostics - ERROR")
+            term.setCursorPos(1, 3); print("  Cannot create ans_log.csv"); sleep(3); return
+        end
+        f.writeLine("time,rawSig,targetH,altitude,hErr,hIntegral,ff,heightOut,pitch,tErr,tIntegral,tiltMax,tiltOut,frontOut,backOut,velocityY")
+
+        local startTime = os.clock()
+        while os.clock() - startTime < DIAG_SECONDS do
+            local elapsed = os.clock() - startTime
+
+            local altitude  = altSensor.getHeight()
+            local velocityY = altSensor.getVerticalSpeed()
+            local rawSig    = bridge.getLinkSignal(HEIGHT_F1, HEIGHT_F2)
+            local targetH   = cfg.minHeight + (1 - rawSig / 15) * (cfg.maxHeight - cfg.minHeight)
+            if lastHTarget and math.abs(targetH - lastHTarget) > 5 then hIntegral = 0 end
+            lastHTarget = targetH
+            local hErr      = targetH - altitude
+            hIntegral       = clamp(hIntegral + hErr * LOOP_INTERVAL, -INTEGRAL_CLAMP, INTEGRAL_CLAMP)
+            local ff        = ffOutput(targetH, cfg.equilMap)
+            local heightOut = clamp(ff + cfg.hKp * hErr + cfg.hKi * hIntegral + cfg.hKd * (-velocityY), 0, 15)
+
+            local angles    = gimbal.getAngles()
+            local raw       = angles[2]
+            local pitch     = raw > 180 and raw - 360 or raw
+            local pitchRate = prevPitch and ((pitch - prevPitch) / LOOP_INTERVAL) or 0
+            prevPitch = pitch
+            local tErr    = -pitch
+            local tiltMax = math.min(7.5, heightOut)
+            if tiltMax > 0 then
+                tIntegral = clamp(tIntegral + tErr * LOOP_INTERVAL, -INTEGRAL_CLAMP, INTEGRAL_CLAMP)
+            end
+            local tiltOut = clamp(cfg.tKp * tErr + cfg.tKi * tIntegral + cfg.tKd * (-pitchRate), -tiltMax, tiltMax)
+
+            local frontOut = clamp(math.floor(heightOut + tiltOut + 0.5), 0, 15)
+            local backOut  = clamp(math.floor(heightOut - tiltOut + 0.5), 0, 15)
+            bridge.sendLinkSignal(FRONT_F1, FRONT_F2, frontOut)
+            bridge.sendLinkSignal(BACK_F1,  BACK_F2,  backOut)
+
+            f.writeLine(string.format("%.2f,%d,%.2f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%d,%d,%.3f",
+                elapsed, rawSig, targetH, altitude, hErr, hIntegral, ff, heightOut,
+                pitch, tErr, tIntegral, tiltMax, tiltOut, frontOut, backOut, velocityY))
+            f.flush()
+
+            cls(); header("Diagnostics")
+            statusLine(3, string.format("  Alt    : %.1f / %.1f m", altitude, targetH))
+            statusLine(4, string.format("  H PID  : %.2f/15  ff=%.2f  err=%+.1f", heightOut, ff, hErr))
+            statusLine(5, string.format("  rawSig : %d  hInt: %.1f", rawSig, hIntegral))
+            statusLine(6, string.format("  Pitch  : %+.2f  tOut=%+.2f  tMax=%.2f", pitch, tiltOut, tiltMax))
+            statusLine(7, string.format("  Front  : %d/15   Back: %d/15", frontOut, backOut))
+            statusLine(8, string.format("  Time   : %.1f / %d s", elapsed, DIAG_SECONDS))
+            footer("Logging to ans_log.csv  [wait " .. DIAG_SECONDS .. "s]")
+
+            sleep(LOOP_INTERVAL)
+        end
+
+        bridge.sendLinkSignal(FRONT_F1, FRONT_F2, 0)
+        bridge.sendLinkSignal(BACK_F1,  BACK_F2,  0)
+        f.close()
+
+        cls(); header("Diagnostics - Done")
+        term.setCursorPos(1, 3)
+        print("  Saved 30s log to ans_log.csv")
+        print("")
+        print("  To read it, open another terminal")
+        print("  on this computer and run:")
+        print("    edit ans_log.csv")
+        sleep(6)
+    end
 
     local function keyHandler()
         while not action do
@@ -862,18 +917,14 @@ local function runControl(cfg)
             if     key == keys.c then action = "calibrateH"
             elseif key == keys.t then action = "calibrateT"
             elseif key == keys.r then action = "reconfigure"
-            elseif key == keys.g then
-                logActive = not logActive
-                if not logActive and logHandle then
-                    logHandle.close(); logHandle = nil
-                end
+            elseif key == keys.d then action = "diagnose"
             end
         end
     end
 
     cls()
     header("Control Module")
-    footer("[U] Restart [C] Cal.H [T] Cal.T [R] Setup [G] Log")
+    footer("[U] Restart [C] Cal.H [T] Cal.T [R] Setup [D] Diag")
 
     while true do
         action = nil
@@ -882,8 +933,6 @@ local function runControl(cfg)
 
         bridge.sendLinkSignal(FRONT_F1, FRONT_F2, 0)
         bridge.sendLinkSignal(BACK_F1,  BACK_F2,  0)
-        if logHandle then logHandle.close(); logHandle = nil end
-        logActive = false
 
         if action == "reconfigure" then
             runSetup()
@@ -893,11 +942,13 @@ local function runControl(cfg)
         elseif action == "calibrateT" then
             local result = runTiltCalibration(cfg, bridge, gimbal)
             if result then cfg = result end
+        elseif action == "diagnose" then
+            runDiagnose()
         end
 
         cls()
         header("Control Module")
-        footer("[U] Restart [C] Cal.H [T] Cal.T [R] Setup [G] Log")
+        footer("[U] Restart [C] Cal.H [T] Cal.T [R] Setup [D] Diag")
     end
 end
 
