@@ -1,7 +1,7 @@
 -- Axiom Navigation Systems v1.0.7
 -- Navigation control system for the AXIOM airship
 
-local VERSION     = "1.3.7"
+local VERSION     = "1.3.8"
 local CONFIG_PATH = "ans_config.json"
 local PROTOCOL    = "axiom_nav"
 
@@ -10,7 +10,7 @@ local PROGRAM_SRC = "Programs/Axiom Navigation Systems/program.lua"
 local SOUNDS_PATH = fs.getDir(shell.getRunningProgram()) .. "/sounds/"
 
 -- AutoNav arrival: horizontal distance threshold in blocks
-local ARRIVAL_RADIUS = 30
+local ARRIVAL_RADIUS = 50
 
 -- PID control loop
 local LOOP_INTERVAL  = 0.1
@@ -835,9 +835,26 @@ local function runControl(cfg)
             statusLine(9,  string.format("  AP     : %s", apStatus))
             statusLine(10, string.format("  Fuel   : %d/15", fuel))
 
+            if logActive then
+                if not logHandle then
+                    logHandle = fs.open("ans_log.csv", "w")
+                    logHandle.writeLine("time,rawSig,targetH,altitude,hErr,hIntegral,ff,heightOut,pitch,tErr,tIntegral,tiltMax,tiltOut,frontOut,backOut,velocityY")
+                end
+                logHandle.writeLine(string.format("%.2f,%d,%.2f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%d,%d,%.3f",
+                    os.clock(), rawSig, targetH, altitude, hErr, hIntegral, ff, heightOut,
+                    pitch, tErr, tIntegral, tiltMax, tiltOut, frontOut, backOut, velocityY))
+                logHandle.flush()
+            elseif logHandle then
+                logHandle.close(); logHandle = nil
+            end
+            statusLine(11, logActive and "  [L] LOGGING -> ans_log.csv" or "")
+
             sleep(LOOP_INTERVAL)
         end
     end
+
+    local logActive = false
+    local logHandle = nil
 
     local function keyHandler()
         while not action do
@@ -845,13 +862,18 @@ local function runControl(cfg)
             if     key == keys.c then action = "calibrateH"
             elseif key == keys.t then action = "calibrateT"
             elseif key == keys.r then action = "reconfigure"
+            elseif key == keys.l then
+                logActive = not logActive
+                if not logActive and logHandle then
+                    logHandle.close(); logHandle = nil
+                end
             end
         end
     end
 
     cls()
     header("Control Module")
-    footer("[U] Restart All  [C] Cal.H  [T] Cal.T  [R] Setup")
+    footer("[U] Restart [C] Cal.H [T] Cal.T [R] Setup [L] Log")
 
     while true do
         action = nil
@@ -860,6 +882,8 @@ local function runControl(cfg)
 
         bridge.sendLinkSignal(FRONT_F1, FRONT_F2, 0)
         bridge.sendLinkSignal(BACK_F1,  BACK_F2,  0)
+        if logHandle then logHandle.close(); logHandle = nil end
+        logActive = false
 
         if action == "reconfigure" then
             runSetup()
@@ -873,7 +897,7 @@ local function runControl(cfg)
 
         cls()
         header("Control Module")
-        footer("[U] Restart All  [C] Cal.H  [T] Cal.T  [R] Setup")
+        footer("[U] Restart [C] Cal.H [T] Cal.T [R] Setup [L] Log")
     end
 end
 
