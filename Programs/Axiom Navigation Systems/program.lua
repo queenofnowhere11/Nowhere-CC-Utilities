@@ -1,7 +1,7 @@
 -- Axiom Navigation Systems v1.0.7
 -- Navigation control system for the AXIOM airship
 
-local VERSION     = "1.3.3"
+local VERSION     = "1.3.4"
 local CONFIG_PATH = "ans_config.json"
 local PROTOCOL    = "axiom_nav"
 
@@ -579,7 +579,7 @@ local function runTiltCalibration(cfg, bridge, gimbal)
         while true do
             local elapsed = os.epoch("utc") / 1000 - startTime
             local angles  = gimbal.getAngles()
-            local raw     = angles[1]
+            local raw     = angles[2]
             local pitch   = raw > 180 and raw - 360 or raw
 
             tiltRelay = (pitch > 0) and -TILT_RELAY_AMP or TILT_RELAY_AMP
@@ -778,7 +778,7 @@ local function runControl(cfg)
 
             -- Tilt PID
             local angles    = gimbal.getAngles()
-            local raw       = angles[1]
+            local raw       = angles[2]
             local pitch     = raw > 180 and raw - 360 or raw
             local pitchRate = prevPitch and ((pitch - prevPitch) / LOOP_INTERVAL) or 0
             prevPitch = pitch
