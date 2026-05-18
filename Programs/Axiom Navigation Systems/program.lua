@@ -1,7 +1,7 @@
 -- Axiom Navigation Systems v1.0.7
 -- Navigation control system for the AXIOM airship
 
-local VERSION     = "1.3.10"
+local VERSION     = "1.3.11"
 local CONFIG_PATH = "ans_config.json"
 local PROTOCOL    = "axiom_nav"
 
@@ -773,7 +773,8 @@ local function runControl(cfg)
             lastHTarget = targetH
             local hErr      = targetH - altitude
             hIntegral       = clamp(hIntegral + hErr * LOOP_INTERVAL, -INTEGRAL_CLAMP, INTEGRAL_CLAMP)
-            local ff        = ffOutput(targetH, cfg.equilMap)
+            local ffScale   = clamp(1.0 + hErr / 10.0, 0.0, 1.0)
+            local ff        = ffOutput(targetH, cfg.equilMap) * ffScale
             local heightOut = clamp(ff + cfg.hKp * hErr + cfg.hKi * hIntegral + cfg.hKd * (-velocityY), 0, 15)
 
             -- Tilt PID
@@ -860,7 +861,8 @@ local function runControl(cfg)
             lastHTarget = targetH
             local hErr      = targetH - altitude
             hIntegral       = clamp(hIntegral + hErr * LOOP_INTERVAL, -INTEGRAL_CLAMP, INTEGRAL_CLAMP)
-            local ff        = ffOutput(targetH, cfg.equilMap)
+            local ffScale   = clamp(1.0 + hErr / 10.0, 0.0, 1.0)
+            local ff        = ffOutput(targetH, cfg.equilMap) * ffScale
             local heightOut = clamp(ff + cfg.hKp * hErr + cfg.hKi * hIntegral + cfg.hKd * (-velocityY), 0, 15)
 
             local angles    = gimbal.getAngles()
