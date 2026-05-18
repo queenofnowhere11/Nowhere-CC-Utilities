@@ -1,7 +1,7 @@
 -- Axiom Navigation Systems v1.0.7
 -- Navigation control system for the AXIOM airship
 
-local VERSION     = "1.3.8"
+local VERSION     = "1.3.9"
 local CONFIG_PATH = "ans_config.json"
 local PROTOCOL    = "axiom_nav"
 
@@ -862,7 +862,7 @@ local function runControl(cfg)
             if     key == keys.c then action = "calibrateH"
             elseif key == keys.t then action = "calibrateT"
             elseif key == keys.r then action = "reconfigure"
-            elseif key == keys.l then
+            elseif key == keys.g then
                 logActive = not logActive
                 if not logActive and logHandle then
                     logHandle.close(); logHandle = nil
@@ -873,7 +873,7 @@ local function runControl(cfg)
 
     cls()
     header("Control Module")
-    footer("[U] Restart [C] Cal.H [T] Cal.T [R] Setup [L] Log")
+    footer("[U] Restart [C] Cal.H [T] Cal.T [R] Setup [G] Log")
 
     while true do
         action = nil
@@ -897,7 +897,7 @@ local function runControl(cfg)
 
         cls()
         header("Control Module")
-        footer("[U] Restart [C] Cal.H [T] Cal.T [R] Setup [L] Log")
+        footer("[U] Restart [C] Cal.H [T] Cal.T [R] Setup [G] Log")
     end
 end
 
