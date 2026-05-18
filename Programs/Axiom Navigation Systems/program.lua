@@ -1,7 +1,7 @@
 -- Axiom Navigation Systems v1.0.7
 -- Navigation control system for the AXIOM airship
 
-local VERSION     = "1.3.5"
+local VERSION     = "1.3.7"
 local CONFIG_PATH = "ans_config.json"
 local PROTOCOL    = "axiom_nav"
 
@@ -10,7 +10,7 @@ local PROGRAM_SRC = "Programs/Axiom Navigation Systems/program.lua"
 local SOUNDS_PATH = fs.getDir(shell.getRunningProgram()) .. "/sounds/"
 
 -- AutoNav arrival: horizontal distance threshold in blocks
-local ARRIVAL_RADIUS = 15
+local ARRIVAL_RADIUS = 30
 
 -- PID control loop
 local LOOP_INTERVAL  = 0.1
@@ -783,8 +783,14 @@ local function runControl(cfg)
             local pitchRate = prevPitch and ((pitch - prevPitch) / LOOP_INTERVAL) or 0
             prevPitch = pitch
             local tErr    = -pitch
-            tIntegral     = clamp(tIntegral + tErr * LOOP_INTERVAL, -INTEGRAL_CLAMP, INTEGRAL_CLAMP)
-            local tiltOut = clamp(cfg.tKp * tErr + cfg.tKi * tIntegral + cfg.tKd * (-pitchRate), -7.5, 7.5)
+            -- Tilt authority is capped at heightOut so that front+back always sums to 2*heightOut.
+            -- This prevents any tilt correction from adding net lift when the height PID wants zero.
+            -- Freeze the integral when tiltMax=0 (descending) to avoid windup.
+            local tiltMax = math.min(7.5, heightOut)
+            if tiltMax > 0 then
+                tIntegral = clamp(tIntegral + tErr * LOOP_INTERVAL, -INTEGRAL_CLAMP, INTEGRAL_CLAMP)
+            end
+            local tiltOut = clamp(cfg.tKp * tErr + cfg.tKi * tIntegral + cfg.tKd * (-pitchRate), -tiltMax, tiltMax)
 
             -- Combine and output
             local frontOut = clamp(math.floor(heightOut + tiltOut + 0.5), 0, 15)
@@ -819,7 +825,8 @@ local function runControl(cfg)
                           or arrived and "ON - ARRIVED"
                           or string.format("ON (%.0f m)", distance or 0)
 
-            statusLine(3,  string.format("  Alt    : %.1f / %.1f m", altitude, targetH))
+            local atFloor  = heightOut == 0 and altitude > targetH + 2
+            statusLine(3,  string.format("  Alt    : %.1f / %.1f m%s", altitude, targetH, atFloor and " [FLOOR]" or ""))
             statusLine(4,  string.format("  VelY   : %+.2f m/s", velocityY))
             statusLine(5,  string.format("  Pitch  : %+.2f deg", pitch))
             statusLine(6,  string.format("  H PID  : %.1f/15 (err: %+.1f)", heightOut, hErr))
