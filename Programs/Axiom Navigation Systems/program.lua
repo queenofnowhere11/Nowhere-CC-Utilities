@@ -1,7 +1,7 @@
 -- Axiom Navigation Systems v1.0.7
 -- Navigation control system for the AXIOM airship
 
-local VERSION     = "1.3.16"
+local VERSION     = "1.3.17"
 local CONFIG_PATH = "ans_config.json"
 local PROTOCOL    = "axiom_nav"
 
@@ -771,10 +771,14 @@ local function runControl(cfg)
             local targetH   = cfg.minHeight + (1 - rawSig / 15) * (cfg.maxHeight - cfg.minHeight)
             if lastHTarget and math.abs(targetH - lastHTarget) > 5 then hIntegral = 0 end
             lastHTarget = targetH
-            local hErr      = targetH - altitude
-            hIntegral       = clamp(hIntegral + hErr * LOOP_INTERVAL, -INTEGRAL_CLAMP, INTEGRAL_CLAMP)
-            local ff        = ffOutput(altitude, cfg.equilMap)
-            local heightOut = clamp(ff + cfg.hKp * hErr + cfg.hKi * hIntegral + cfg.hKd * (-velocityY), 0, 15)
+            local hErr   = targetH - altitude
+            local ff     = ffOutput(altitude, cfg.equilMap)
+            local pidRaw = ff + cfg.hKp * hErr + cfg.hKi * hIntegral + cfg.hKd * (-velocityY)
+            -- Anti-windup: freeze integral when saturated and integrating would worsen saturation
+            if not (pidRaw < 0 and hErr < 0) and not (pidRaw > 15 and hErr > 0) then
+                hIntegral = clamp(hIntegral + hErr * LOOP_INTERVAL, -INTEGRAL_CLAMP, INTEGRAL_CLAMP)
+            end
+            local heightOut = clamp(pidRaw, 0, 15)
 
             -- Tilt PID
             local angles    = gimbal.getAngles()
@@ -877,10 +881,13 @@ local function runControl(cfg)
             local targetH   = cfg.minHeight + (1 - rawSig / 15) * (cfg.maxHeight - cfg.minHeight)
             if lastHT and math.abs(targetH - lastHT) > 5 then hInt = 0 end
             lastHT = targetH
-            local hErr  = targetH - altitude
-            hInt        = clamp(hInt + hErr * LOOP_INTERVAL, -INTEGRAL_CLAMP, INTEGRAL_CLAMP)
-            local ff    = ffOutput(targetH, cfg.equilMap)
-            local heightOut = clamp(ff + cfg.hKp * hErr + cfg.hKi * hInt + cfg.hKd * (-velocityY), 0, 15)
+            local hErr   = targetH - altitude
+            local ff     = ffOutput(altitude, cfg.equilMap)
+            local pidRaw = ff + cfg.hKp * hErr + cfg.hKi * hInt + cfg.hKd * (-velocityY)
+            if not (pidRaw < 0 and hErr < 0) and not (pidRaw > 15 and hErr > 0) then
+                hInt = clamp(hInt + hErr * LOOP_INTERVAL, -INTEGRAL_CLAMP, INTEGRAL_CLAMP)
+            end
+            local heightOut = clamp(pidRaw, 0, 15)
 
             local angles    = gimbal.getAngles()
             local rawAngle  = angles[2]
