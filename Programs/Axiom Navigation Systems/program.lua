@@ -1,7 +1,7 @@
 -- Axiom Navigation Systems v1.0.7
 -- Navigation control system for the AXIOM airship
 
-local VERSION     = "1.3.13"
+local VERSION     = "1.3.5"
 local CONFIG_PATH = "ans_config.json"
 local PROTOCOL    = "axiom_nav"
 
@@ -10,7 +10,7 @@ local PROGRAM_SRC = "Programs/Axiom Navigation Systems/program.lua"
 local SOUNDS_PATH = fs.getDir(shell.getRunningProgram()) .. "/sounds/"
 
 -- AutoNav arrival: horizontal distance threshold in blocks
-local ARRIVAL_RADIUS = 50
+local ARRIVAL_RADIUS = 15
 
 -- PID control loop
 local LOOP_INTERVAL  = 0.1
@@ -773,7 +773,7 @@ local function runControl(cfg)
             lastHTarget = targetH
             local hErr      = targetH - altitude
             hIntegral       = clamp(hIntegral + hErr * LOOP_INTERVAL, -INTEGRAL_CLAMP, INTEGRAL_CLAMP)
-            local ff        = ffOutput(altitude, cfg.equilMap)
+            local ff        = ffOutput(targetH, cfg.equilMap)
             local heightOut = clamp(ff + cfg.hKp * hErr + cfg.hKi * hIntegral + cfg.hKd * (-velocityY), 0, 15)
 
             -- Tilt PID
@@ -783,14 +783,8 @@ local function runControl(cfg)
             local pitchRate = prevPitch and ((pitch - prevPitch) / LOOP_INTERVAL) or 0
             prevPitch = pitch
             local tErr    = -pitch
-            -- Tilt authority is capped at heightOut so that front+back always sums to 2*heightOut.
-            -- This prevents any tilt correction from adding net lift when the height PID wants zero.
-            -- Freeze the integral when tiltMax=0 (descending) to avoid windup.
-            local tiltMax = math.min(7.5, heightOut)
-            if tiltMax > 0 then
-                tIntegral = clamp(tIntegral + tErr * LOOP_INTERVAL, -INTEGRAL_CLAMP, INTEGRAL_CLAMP)
-            end
-            local tiltOut = clamp(cfg.tKp * tErr + cfg.tKi * tIntegral + cfg.tKd * (-pitchRate), -tiltMax, tiltMax)
+            tIntegral     = clamp(tIntegral + tErr * LOOP_INTERVAL, -INTEGRAL_CLAMP, INTEGRAL_CLAMP)
+            local tiltOut = clamp(cfg.tKp * tErr + cfg.tKi * tIntegral + cfg.tKd * (-pitchRate), -7.5, 7.5)
 
             -- Combine and output
             local frontOut = clamp(math.floor(heightOut + tiltOut + 0.5), 0, 15)
@@ -825,8 +819,7 @@ local function runControl(cfg)
                           or arrived and "ON - ARRIVED"
                           or string.format("ON (%.0f m)", distance or 0)
 
-            local atFloor  = heightOut == 0 and altitude > targetH + 2
-            statusLine(3,  string.format("  Alt    : %.1f / %.1f m%s", altitude, targetH, atFloor and " [FLOOR]" or ""))
+            statusLine(3,  string.format("  Alt    : %.1f / %.1f m", altitude, targetH))
             statusLine(4,  string.format("  VelY   : %+.2f m/s", velocityY))
             statusLine(5,  string.format("  Pitch  : %+.2f deg", pitch))
             statusLine(6,  string.format("  H PID  : %.1f/15 (err: %+.1f)", heightOut, hErr))
@@ -839,92 +832,19 @@ local function runControl(cfg)
         end
     end
 
-    local function runDiagnose()
-        local DIAG_SECONDS = 30
-        local f = fs.open("ans_log.csv", "w")
-        if not f then
-            cls(); header("Diagnostics - ERROR")
-            term.setCursorPos(1, 3); print("  Cannot create ans_log.csv"); sleep(3); return
-        end
-        f.writeLine("time,rawSig,targetH,altitude,hErr,hIntegral,ff,heightOut,pitch,tErr,tIntegral,tiltMax,tiltOut,frontOut,backOut,velocityY")
-
-        local startTime = os.clock()
-        while os.clock() - startTime < DIAG_SECONDS do
-            local elapsed = os.clock() - startTime
-
-            local altitude  = altSensor.getHeight()
-            local velocityY = altSensor.getVerticalSpeed()
-            local rawSig    = bridge.getLinkSignal(HEIGHT_F1, HEIGHT_F2)
-            local targetH   = cfg.minHeight + (1 - rawSig / 15) * (cfg.maxHeight - cfg.minHeight)
-            if lastHTarget and math.abs(targetH - lastHTarget) > 5 then hIntegral = 0 end
-            lastHTarget = targetH
-            local hErr      = targetH - altitude
-            hIntegral       = clamp(hIntegral + hErr * LOOP_INTERVAL, -INTEGRAL_CLAMP, INTEGRAL_CLAMP)
-            local ff        = ffOutput(altitude, cfg.equilMap)
-            local heightOut = clamp(ff + cfg.hKp * hErr + cfg.hKi * hIntegral + cfg.hKd * (-velocityY), 0, 15)
-
-            local angles    = gimbal.getAngles()
-            local raw       = angles[2]
-            local pitch     = raw > 180 and raw - 360 or raw
-            local pitchRate = prevPitch and ((pitch - prevPitch) / LOOP_INTERVAL) or 0
-            prevPitch = pitch
-            local tErr    = -pitch
-            local tiltMax = math.min(7.5, heightOut)
-            if tiltMax > 0 then
-                tIntegral = clamp(tIntegral + tErr * LOOP_INTERVAL, -INTEGRAL_CLAMP, INTEGRAL_CLAMP)
-            end
-            local tiltOut = clamp(cfg.tKp * tErr + cfg.tKi * tIntegral + cfg.tKd * (-pitchRate), -tiltMax, tiltMax)
-
-            local frontOut = clamp(math.floor(heightOut + tiltOut + 0.5), 0, 15)
-            local backOut  = clamp(math.floor(heightOut - tiltOut + 0.5), 0, 15)
-            bridge.sendLinkSignal(FRONT_F1, FRONT_F2, frontOut)
-            bridge.sendLinkSignal(BACK_F1,  BACK_F2,  backOut)
-
-            f.writeLine(string.format("%.2f,%d,%.2f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%d,%d,%.3f",
-                elapsed, rawSig, targetH, altitude, hErr, hIntegral, ff, heightOut,
-                pitch, tErr, tIntegral, tiltMax, tiltOut, frontOut, backOut, velocityY))
-            f.flush()
-
-            cls(); header("Diagnostics")
-            statusLine(3, string.format("  Alt    : %.1f / %.1f m", altitude, targetH))
-            statusLine(4, string.format("  H PID  : %.2f/15  ff=%.2f  err=%+.1f", heightOut, ff, hErr))
-            statusLine(5, string.format("  rawSig : %d  hInt: %.1f", rawSig, hIntegral))
-            statusLine(6, string.format("  Pitch  : %+.2f  tOut=%+.2f  tMax=%.2f", pitch, tiltOut, tiltMax))
-            statusLine(7, string.format("  Front  : %d/15   Back: %d/15", frontOut, backOut))
-            statusLine(8, string.format("  Time   : %.1f / %d s", elapsed, DIAG_SECONDS))
-            footer("Logging to ans_log.csv  [wait " .. DIAG_SECONDS .. "s]")
-
-            sleep(LOOP_INTERVAL)
-        end
-
-        bridge.sendLinkSignal(FRONT_F1, FRONT_F2, 0)
-        bridge.sendLinkSignal(BACK_F1,  BACK_F2,  0)
-        f.close()
-
-        cls(); header("Diagnostics - Done")
-        term.setCursorPos(1, 3)
-        print("  Saved 30s log to ans_log.csv")
-        print("")
-        print("  To read it, open another terminal")
-        print("  on this computer and run:")
-        print("    edit ans_log.csv")
-        sleep(6)
-    end
-
     local function keyHandler()
         while not action do
             local _, key = os.pullEvent("key")
             if     key == keys.c then action = "calibrateH"
             elseif key == keys.t then action = "calibrateT"
             elseif key == keys.r then action = "reconfigure"
-            elseif key == keys.d then action = "diagnose"
             end
         end
     end
 
     cls()
     header("Control Module")
-    footer("[U] Restart [C] Cal.H [T] Cal.T [R] Setup [D] Diag")
+    footer("[U] Restart All  [C] Cal.H  [T] Cal.T  [R] Setup")
 
     while true do
         action = nil
@@ -942,13 +862,11 @@ local function runControl(cfg)
         elseif action == "calibrateT" then
             local result = runTiltCalibration(cfg, bridge, gimbal)
             if result then cfg = result end
-        elseif action == "diagnose" then
-            runDiagnose()
         end
 
         cls()
         header("Control Module")
-        footer("[U] Restart [C] Cal.H [T] Cal.T [R] Setup [D] Diag")
+        footer("[U] Restart All  [C] Cal.H  [T] Cal.T  [R] Setup")
     end
 end
 
