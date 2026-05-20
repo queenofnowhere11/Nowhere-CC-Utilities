@@ -1,7 +1,7 @@
 -- Axiom Navigation Systems v1.0.7
 -- Navigation control system for the AXIOM airship
 
-local VERSION     = "1.3.17"
+local VERSION     = "1.3.18"
 local CONFIG_PATH = "ans_config.json"
 local PROTOCOL    = "axiom_nav"
 
@@ -1152,7 +1152,7 @@ local function runReadout()
                 dispThr, dispRev = 0, false
             else
                 local h = d.heading or 180
-                dispThr = math.floor(math.abs(math.cos(math.rad(h))) * 15 + 0.5)
+                dispThr = math.min(math.floor(math.abs(math.cos(math.rad(h))) * 15 + 0.5), d.throttle)
                 dispRev = (h < 90 or h > 270)
             end
         end
@@ -1352,7 +1352,7 @@ local function runEngine(cfg)
                 local h = sData.heading or 180
                 -- full deflection outside ±30° of 180°; interpolate within that window
                 local apWheel = math.max(-1, math.min(1, (h - 180) / 30))
-                throttle = math.floor(math.abs(math.cos(math.rad(h))) * 15 + 0.5)
+                throttle = math.min(math.floor(math.abs(math.cos(math.rad(h))) * 15 + 0.5), sData.throttle)
                 reverse  = (h < 90 or h > 270)
                 left     = math.max(-apWheel, 0)
                 right    = math.max( apWheel, 0)
