@@ -1,7 +1,7 @@
 -- Axiom Navigation Systems v1.0.7
 -- Navigation control system for the AXIOM airship
 
-local VERSION     = "1.4.3"
+local VERSION     = "1.4.4"
 local CONFIG_PATH = "ans_config.json"
 local PROTOCOL    = "axiom_nav"
 
@@ -1479,8 +1479,8 @@ local function runElevator()
             local dock    = bridge.getLinkSignal(ELEV_DOCK_F1, ELEV_DOCK_F2)
             local sensor  = bridge.getLinkSignal(ELEV_SENS_F1, ELEV_SENS_F2)
 
-            local moving    = dock < 15 and (sensor < 15 or control == 15)
-            local goingDown = dock < 15 and control == 0 and sensor < 15
+            local moving    = dock < 15 and (sensor < 8 or control == 15)
+            local goingDown = dock < 15 and control == 0 and sensor < 8
 
             rs.setOutput("right", moving)
             rs.setOutput("left",  goingDown)
@@ -1498,7 +1498,7 @@ local function runElevator()
 
             statusLine(3, string.format("  Command  : %s", control == 15 and "AXIOM" or "GROUND"))
             statusLine(4, string.format("  Dock     : %s", dock    == 15 and "DOCKED" or "UNDOCKED"))
-            statusLine(5, string.format("  Sensor   : %s", sensor  == 15 and "GROUNDED" or "IN TRANSIT"))
+            statusLine(5, string.format("  Sensor   : %s", sensor  >= 8 and "GROUNDED" or "IN TRANSIT"))
             statusLine(6, string.format("  Status   : %s", status))
             statusLine(8, string.format("  Clutch   : %s", moving    and "ON"   or "OFF"))
             statusLine(9, string.format("  Direction: %s", goingDown and "DOWN" or "UP"))
