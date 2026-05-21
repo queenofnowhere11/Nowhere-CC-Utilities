@@ -1,7 +1,7 @@
 -- Axiom Navigation Systems v1.0.7
 -- Navigation control system for the AXIOM airship
 
-local VERSION     = "1.3.18"
+local VERSION     = "1.4.0"
 local CONFIG_PATH = "ans_config.json"
 local PROTOCOL    = "axiom_nav"
 
@@ -33,6 +33,14 @@ local FRONT_F1 = "everycomp:tf/biomeswevegone/hollow_ebony_log"  -- nose up
 local FRONT_F2 = "createdeco:decal_up"
 local BACK_F1  = "everycomp:tf/biomeswevegone/hollow_ebony_log"  -- nose down
 local BACK_F2  = "createdeco:decal_down"
+
+-- Elevator inputs
+local ELEV_CTRL_F1 = "everycomp:tf/biomeswevegone/hollow_ebony_log"
+local ELEV_CTRL_F2 = "supplementaries:cage"
+local ELEV_DOCK_F1 = "everycomp:tf/biomeswevegone/hollow_ebony_log"
+local ELEV_DOCK_F2 = "simulated:docking_connector"
+local ELEV_SENS_F1 = "everycomp:tf/biomeswevegone/hollow_ebony_log"
+local ELEV_SENS_F2 = "simulated:optical_sensor"
 
 --------------------------------------------------------------------------------
 -- Config
@@ -155,6 +163,7 @@ local MODULES = {
     { id = "pilot",        label = "Pilot",    desc = "Reads steering wheel, broadcasts turn values"  },
     { id = "engine",       label = "Engine",   desc = "Controls left and right engine outputs"        },
     { id = "announcement", label = "Announce", desc = "Plays sounds for system events"               },
+    { id = "elevator",     label = "Elevator", desc = "Controls the Axiom elevator mechanism"        },
 }
 
 local function getModule(cfg)
@@ -1414,6 +1423,63 @@ local function runEngine(cfg)
 end
 
 --------------------------------------------------------------------------------
+-- Module: Elevator
+--------------------------------------------------------------------------------
+
+local function runElevator()
+    local bridge = peripheral.find("redstone_link_bridge")
+    if not bridge then
+        cls(); header("Elevator Module - ERROR")
+        term.setCursorPos(1, 3)
+        printError("  Missing peripheral: redstone_link_bridge")
+        sleep(5); return
+    end
+
+    cls()
+    header("Elevator Module")
+    footer("[U] Restart All")
+
+    local function controlLoop()
+        while true do
+            local control = bridge.getLinkSignal(ELEV_CTRL_F1, ELEV_CTRL_F2)
+            local dock    = bridge.getLinkSignal(ELEV_DOCK_F1, ELEV_DOCK_F2)
+            local sensor  = bridge.getLinkSignal(ELEV_SENS_F1, ELEV_SENS_F2)
+
+            local moving    = dock < 15 and (sensor < 15 or control == 15)
+            local goingDown = dock < 15 and control == 0 and sensor < 15
+
+            rs.setOutput("right", moving)
+            rs.setOutput("left",  goingDown)
+
+            local status
+            if dock == 15 then
+                status = "STOPPED - DOCKED"
+            elseif moving and goingDown then
+                status = "MOVING DOWN"
+            elseif moving then
+                status = "MOVING UP"
+            else
+                status = "STOPPED - AT GROUND"
+            end
+
+            statusLine(3, string.format("  Command  : %s", control == 15 and "AXIOM" or "GROUND"))
+            statusLine(4, string.format("  Dock     : %s", dock    == 15 and "DOCKED" or "UNDOCKED"))
+            statusLine(5, string.format("  Sensor   : %s", sensor  == 15 and "GROUNDED" or "IN TRANSIT"))
+            statusLine(6, string.format("  Status   : %s", status))
+            statusLine(8, string.format("  Clutch   : %s", moving    and "ON"   or "OFF"))
+            statusLine(9, string.format("  Direction: %s", goingDown and "DOWN" or "UP"))
+
+            sleep(0.1)
+        end
+    end
+
+    parallel.waitForAny(controlLoop, restartListener)
+
+    rs.setOutput("right", false)
+    rs.setOutput("left",  false)
+end
+
+--------------------------------------------------------------------------------
 -- Main
 --------------------------------------------------------------------------------
 
@@ -1451,4 +1517,5 @@ elseif module == "readout"      then runReadout()
 elseif module == "pilot"        then runPilot()
 elseif module == "engine"       then runEngine(cfg)
 elseif module == "announcement" then runAnnouncement(cfg)
+elseif module == "elevator"     then runElevator()
 end
