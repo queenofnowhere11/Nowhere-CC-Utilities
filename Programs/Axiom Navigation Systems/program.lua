@@ -1,7 +1,7 @@
 -- Axiom Navigation Systems v1.0.7
 -- Navigation control system for the AXIOM airship
 
-local VERSION     = "1.4.0"
+local VERSION     = "1.4.2"
 local CONFIG_PATH = "ans_config.json"
 local PROTOCOL    = "axiom_nav"
 
@@ -281,8 +281,9 @@ local function runHeightCalibration(cfg, bridge, altSensor)
     term.setCursorPos(1, 3)
     print("  Relay feedback test (Ziegler-Nichols method)")
     print("")
-    print("  Phase 1: Sweeps output levels to find the")
-    print("           equilibrium bracket for target height.")
+    print("  Phase 1: Sweeps all output levels to map")
+    print("           equilibrium heights. Outputs that")
+    print("           equilibrate at or below 75m are skipped.")
     print("           The airship will move -- allow space.")
     print("")
     print("  Phase 2: Oscillates around target height for")
@@ -297,69 +298,67 @@ local function runHeightCalibration(cfg, bridge, altSensor)
         elseif key == keys.q then return nil end
     end
 
-    -- Phase B: Bracket search
-    local relayLow   = nil
-    local relayHigh  = nil
-    local abortFlag  = false
-    local searchFail = false
-    local equilData  = {}
+    -- Phase B: Full equilibrium sweep (both directions from output 8)
+    local relayLow  = nil
+    local relayHigh = nil
+    local abortFlag = false
+    local equilData = {}
 
     local function bracketSearch()
-        local output    = 8
-        local prevEquil = nil
-        local prevOut   = nil
-        local searchDir = nil
-
-        while not abortFlag do
-            setBurners(output)
-            local stableCount = 0
-            while stableCount < 100 and not abortFlag do
-                local currentY  = altSensor.getHeight()
-                local velocityY = altSensor.getVerticalSpeed()
-                if math.abs(velocityY) < 0.5 then
-                    stableCount = stableCount + 1
-                else
-                    stableCount = 0
-                end
-                if currentY < cfg.minHeight - 10 or currentY > cfg.maxHeight + 10 then
-                    abortFlag = true; break
-                end
-                cls()
-                header("Finding Hover Point...")
-                statusLine(3, string.format("  Test output: %d/15", output))
-                statusLine(4, string.format("  Current alt: %.2f m", currentY))
-                statusLine(5, string.format("  Velocity:    %.2f m/s", velocityY))
-                statusLine(6, string.format("  Target:      %.2f m", targetY))
-                statusLine(7, string.format("  Stable:      %.0f/10 s", stableCount * LOOP_INTERVAL))
-                footer("[Q] Abort")
-                sleep(LOOP_INTERVAL)
-            end
-            if abortFlag then break end
-
-            local equilY = altSensor.getHeight()
-            equilData[#equilData + 1] = { output = output, height = equilY }
-
-            if searchDir == nil then
-                searchDir = equilY > targetY and -1 or 1
-            end
-
-            if prevEquil ~= nil then
-                local crossed = (prevEquil < targetY and equilY >= targetY)
-                             or (prevEquil > targetY and equilY <= targetY)
-                if crossed then
-                    if prevEquil < targetY then
-                        relayLow = prevOut; relayHigh = output
-                    else
-                        relayLow = output;  relayHigh = prevOut
+        local function sweepDir(startOut, dir)
+            local prevEquil = nil
+            local prevOut   = nil
+            local output    = startOut
+            while not abortFlag do
+                if output < 1 or output > 15 then break end
+                setBurners(output)
+                local stableCount = 0
+                local softStop    = false
+                while stableCount < 100 and not abortFlag do
+                    local currentY  = altSensor.getHeight()
+                    local velocityY = altSensor.getVerticalSpeed()
+                    if currentY < 70 or currentY > cfg.maxHeight + 30 then
+                        softStop = true; break
                     end
-                    break
+                    if math.abs(velocityY) < 0.5 then
+                        stableCount = stableCount + 1
+                    else
+                        stableCount = 0
+                    end
+                    cls(); header("Finding Hover Point...")
+                    statusLine(3, string.format("  Test output : %d/15  (%d pts collected)",
+                        output, #equilData))
+                    statusLine(4, string.format("  Current alt : %.2f m", currentY))
+                    statusLine(5, string.format("  Velocity    : %.2f m/s", velocityY))
+                    statusLine(6, string.format("  Relay target: %.2f m", targetY))
+                    statusLine(7, string.format("  Stable      : %.0f/10 s",
+                        stableCount * LOOP_INTERVAL))
+                    footer("[Q] Abort")
+                    sleep(LOOP_INTERVAL)
                 end
+                if abortFlag or softStop then break end
+                local equilY = altSensor.getHeight()
+                if equilY <= 75 or equilY > cfg.maxHeight + 30 then break end
+                equilData[#equilData + 1] = { output = output, height = equilY }
+                if prevEquil ~= nil then
+                    local crossed = (prevEquil < targetY and equilY >= targetY)
+                                 or (prevEquil > targetY and equilY <= targetY)
+                    if crossed then
+                        if prevEquil < targetY then
+                            relayLow = prevOut; relayHigh = output
+                        else
+                            relayLow = output;  relayHigh = prevOut
+                        end
+                    end
+                end
+                prevEquil = equilY
+                prevOut   = output
+                output    = output + dir
             end
-
-            prevEquil = equilY
-            prevOut   = output
-            output    = output + searchDir
-            if output < 0 or output > 15 then searchFail = true; break end
+        end
+        sweepDir(8, -1)             -- down: 8 → 7 → ... → 1 (stops when equil ≤ 75 m)
+        if not abortFlag then
+            sweepDir(9,  1)         -- up:   9 → 10 → ... → 15 (stops above max range)
         end
     end
 
@@ -386,9 +385,9 @@ local function runHeightCalibration(cfg, bridge, altSensor)
         os.pullEvent("key")
     end
 
-    if abortFlag  then return nil end
-    if searchFail then
-        failScreen("  Target height unreachable.\n  Adjust min/max height range.")
+    if abortFlag then return nil end
+    if not relayLow then
+        failScreen("  Could not bracket target height.\n  Adjust min/max height range.")
         return nil
     end
 
@@ -768,6 +767,7 @@ local function runControl(cfg)
     local hIntegral   = 0
     local tIntegral   = 0
     local lastHTarget = nil
+    local lastHErr    = nil
     local prevPitch   = nil
     local action      = nil
 
@@ -781,6 +781,9 @@ local function runControl(cfg)
             if lastHTarget and math.abs(targetH - lastHTarget) > 5 then hIntegral = 0 end
             lastHTarget = targetH
             local hErr   = targetH - altitude
+            -- Reset integral when descending through the setpoint (prevents stale wind-up on arrival)
+            if lastHErr ~= nil and lastHErr < 0 and hErr >= 0 then hIntegral = 0 end
+            lastHErr = hErr
             local ff     = ffOutput(altitude, cfg.equilMap)
             local pidRaw = ff + cfg.hKp * hErr + cfg.hKi * hIntegral + cfg.hKd * (-velocityY)
             -- Anti-windup: freeze integral when saturated and integrating would worsen saturation
@@ -870,10 +873,11 @@ local function runControl(cfg)
 
         f.writeLine("time,rawSig,targetH,altitude,hErr,hIntegral,ff,heightOut,pitch,tErr,tIntegral,tiltOut,frontOut,backOut,velocityY")
 
-        local hInt   = 0
-        local tInt   = 0
-        local lastHT = nil
-        local prevP  = nil
+        local hInt    = 0
+        local tInt    = 0
+        local lastHT  = nil
+        local lastHE  = nil
+        local prevP   = nil
 
         cls(); header("Diagnostic")
         footer("Running - " .. DIAG_SECONDS .. "s log in progress")
@@ -891,6 +895,8 @@ local function runControl(cfg)
             if lastHT and math.abs(targetH - lastHT) > 5 then hInt = 0 end
             lastHT = targetH
             local hErr   = targetH - altitude
+            if lastHE ~= nil and lastHE < 0 and hErr >= 0 then hInt = 0 end
+            lastHE = hErr
             local ff     = ffOutput(altitude, cfg.equilMap)
             local pidRaw = ff + cfg.hKp * hErr + cfg.hKi * hInt + cfg.hKd * (-velocityY)
             if not (pidRaw < 0 and hErr < 0) and not (pidRaw > 15 and hErr > 0) then
@@ -943,7 +949,7 @@ local function runControl(cfg)
 
     while true do
         action = nil
-        hIntegral = 0; tIntegral = 0; lastHTarget = nil; prevPitch = nil
+        hIntegral = 0; tIntegral = 0; lastHTarget = nil; lastHErr = nil; prevPitch = nil
         parallel.waitForAny(controlLoop, keyHandler, restartListener)
 
         bridge.sendLinkSignal(FRONT_F1, FRONT_F2, 0)
