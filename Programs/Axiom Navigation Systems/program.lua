@@ -1,7 +1,7 @@
 -- Axiom Navigation Systems v1.0.7
 -- Navigation control system for the AXIOM airship
 
-local VERSION     = "1.4.2"
+local VERSION     = "1.4.3"
 local CONFIG_PATH = "ans_config.json"
 local PROTOCOL    = "axiom_nav"
 
@@ -389,6 +389,34 @@ local function runHeightCalibration(cfg, bridge, altSensor)
     if not relayLow then
         failScreen("  Could not bracket target height.\n  Adjust min/max height range.")
         return nil
+    end
+
+    -- Recovery: Phase B may have pushed the ship low; climb back near targetY before relay
+    if altSensor.getHeight() < targetY - 30 then
+        cls(); header("Recovering Altitude...")
+        local recoverAbort = false
+        local function recoverClimb()
+            setBurners(relayHigh)
+            while true do
+                local y = altSensor.getHeight()
+                statusLine(3, string.format("  Climbing to %.1f m...", targetY))
+                statusLine(4, string.format("  Current  : %.2f m", y))
+                footer("[Q] Abort")
+                if y >= targetY - 10 then break end
+                if y > cfg.maxHeight + 30 then break end
+                sleep(LOOP_INTERVAL)
+            end
+            setBurners(0)
+        end
+        local function recoverAbortKey()
+            while not recoverAbort do
+                local _, key = os.pullEvent("key")
+                if key == keys.q then recoverAbort = true end
+            end
+        end
+        parallel.waitForAny(recoverClimb, recoverAbortKey)
+        setBurners(0)
+        if recoverAbort then return nil end
     end
 
     local RELAY_AMP = (relayHigh - relayLow) / 2
