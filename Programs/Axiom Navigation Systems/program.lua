@@ -1,7 +1,7 @@
 -- Axiom Navigation Systems v1.0.7
 -- Navigation control system for the AXIOM airship
 
-local VERSION     = "1.5.0"
+local VERSION     = "1.5.1"
 local CONFIG_PATH = "ans_config.json"
 local PROTOCOL    = "axiom_nav"
 
@@ -1018,6 +1018,12 @@ local function runAnnouncement(cfg)
         printError("  Requires a Creative Computer.")
         sleep(5); return
     end
+    if not sublevel then
+        cls(); header("Whistle Module - ERROR")
+        term.setCursorPos(1, 3)
+        printError("  Missing API: sublevel (CC: Sable required)")
+        sleep(5); return
+    end
     if not bridge then
         cls(); header("Whistle Module - ERROR")
         term.setCursorPos(1, 3)
@@ -1030,9 +1036,12 @@ local function runAnnouncement(cfg)
     local offZ = cfg.whistleOffZ or 0
 
     local function playWhistle()
-        local pos = string.format("~%d ~%d ~%d", offX, offY, offZ)
-        commands.exec("playsound create:whistle_train     block @a " .. pos .. " 10 0.5")
-        commands.exec("playsound create:whistle_train_low block @a " .. pos .. " 10 0.5")
+        local pos = sublevel.getLogicalPose().position
+        local x   = math.floor(pos.x + offX + 0.5)
+        local y   = math.floor(pos.y + offY + 0.5)
+        local z   = math.floor(pos.z + offZ + 0.5)
+        commands.exec(string.format("playsound create:whistle_train     block @a %d %d %d 10 0.5", x, y, z))
+        commands.exec(string.format("playsound create:whistle_train_low block @a %d %d %d 10 0.5", x, y, z))
     end
 
     local lastSignal = 0
@@ -1045,11 +1054,13 @@ local function runAnnouncement(cfg)
             end
             lastSignal = sig
 
+            local pos = sublevel.getLogicalPose().position
             statusLine(3, string.format("  Signal   : %d/15", sig))
             statusLine(4, string.format("  Trigger  : %s", sig > 0 and "ACTIVE" or "IDLE"))
-            statusLine(6, string.format("  Offset X : %d", offX))
-            statusLine(7, string.format("  Offset Y : %d", offY))
-            statusLine(8, string.format("  Offset Z : %d", offZ))
+            statusLine(5, string.format("  Position : %.1f / %.1f / %.1f", pos.x, pos.y, pos.z))
+            statusLine(7, string.format("  Offset X : %d", offX))
+            statusLine(8, string.format("  Offset Y : %d", offY))
+            statusLine(9, string.format("  Offset Z : %d", offZ))
             sleep(0.1)
         end
     end
@@ -1077,7 +1088,6 @@ local function runAnnouncement(cfg)
     cls()
     header("Whistle Module")
     footer("[U] Restart All  [Arrows/PgUp/PgDn] Offset")
-    statusLine(5, "  --- Position Offset ---")
 
     parallel.waitForAny(controlLoop, keyHandler, restartListener)
 end
