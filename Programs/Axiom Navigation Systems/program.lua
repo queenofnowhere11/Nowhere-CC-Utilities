@@ -1,7 +1,7 @@
 -- Axiom Navigation Systems v1.0.7
 -- Navigation control system for the AXIOM airship
 
-local VERSION     = "1.4.4"
+local VERSION     = "1.5.0"
 local CONFIG_PATH = "ans_config.json"
 local PROTOCOL    = "axiom_nav"
 
@@ -33,6 +33,10 @@ local FRONT_F1 = "everycomp:tf/biomeswevegone/hollow_ebony_log"  -- nose up
 local FRONT_F2 = "createdeco:decal_up"
 local BACK_F1  = "everycomp:tf/biomeswevegone/hollow_ebony_log"  -- nose down
 local BACK_F2  = "createdeco:decal_down"
+
+-- Whistle trigger input
+local WHISTLE_F1 = "everycomp:tf/biomeswevegone/hollow_ebony_log"
+local WHISTLE_F2 = "create:steam_whistle"
 
 -- Elevator inputs
 local ELEV_CTRL_F1 = "everycomp:tf/biomeswevegone/hollow_ebony_log"
@@ -162,7 +166,7 @@ local MODULES = {
     { id = "readout",      label = "Readout",  desc = "Displays flight data on cockpit monitors"      },
     { id = "pilot",        label = "Pilot",    desc = "Reads steering wheel, broadcasts turn values"  },
     { id = "engine",       label = "Engine",   desc = "Controls left and right engine outputs"        },
-    { id = "announcement", label = "Announce", desc = "Plays sounds for system events"               },
+    { id = "announcement", label = "Whistle",  desc = "Plays whistle sounds via playsound command"  },
     { id = "elevator",     label = "Elevator", desc = "Controls the Axiom elevator mechanism"        },
 }
 
@@ -1006,122 +1010,76 @@ end
 --------------------------------------------------------------------------------
 
 local function runAnnouncement(cfg)
-    local speakers = { peripheral.find("speaker") }
-    local ok, dfpwm = pcall(require, "cc.audio.dfpwm")
-    if not ok then ok, dfpwm = pcall(require, "dfpwm") end
-    if not ok then dfpwm = nil end
+    local bridge = peripheral.find("redstone_link_bridge")
 
-    local soundVolume   = cfg.soundVolume or 1.0
-    local soundQueue    = {}
-    local lastAutopilot = false
-    local lastArrived   = false
-    local lastFuel      = 15
-
-    cls()
-    header("Announcement Module")
-    footer("[U] Restart All  [+/-] Volume")
-
-    local function playSound(path)
-        if not dfpwm or #speakers == 0 or not fs.exists(path) then return end
-        local tasks = {}
-        for _, spk in ipairs(speakers) do
-            tasks[#tasks + 1] = function()
-                local decoder = dfpwm.make_decoder()
-                local f = fs.open(path, "rb")
-                while true do
-                    local chunk = f.read(16 * 1024)
-                    if not chunk then break end
-                    local buf = decoder(chunk)
-                    while not spk.playAudio(buf, soundVolume) do
-                        os.pullEvent("speaker_audio_empty")
-                    end
-                end
-                f.close()
-            end
-        end
-        parallel.waitForAll(table.unpack(tasks))
+    if not commands then
+        cls(); header("Whistle Module - ERROR")
+        term.setCursorPos(1, 3)
+        printError("  Requires a Creative Computer.")
+        sleep(5); return
+    end
+    if not bridge then
+        cls(); header("Whistle Module - ERROR")
+        term.setCursorPos(1, 3)
+        printError("  Missing peripheral: redstone_link_bridge")
+        sleep(5); return
     end
 
-    local function soundLoop()
-        while true do
-            if #soundQueue > 0 then
-                local path = table.remove(soundQueue, 1)
-                playSound(path)
-            else
-                sleep(0.1)
-            end
-        end
+    local offX = cfg.whistleOffX or 0
+    local offY = cfg.whistleOffY or 0
+    local offZ = cfg.whistleOffZ or 0
+
+    local function playWhistle()
+        local pos = string.format("~%d ~%d ~%d", offX, offY, offZ)
+        commands.exec("playsound create:whistle_train     block @a " .. pos .. " 10 0.5")
+        commands.exec("playsound create:whistle_train_low block @a " .. pos .. " 10 0.5")
     end
 
-    local function receiveLoop()
+    local lastSignal = 0
+
+    local function controlLoop()
         while true do
-            local _, msg = rednet.receive(PROTOCOL)
-            if type(msg) == "table" and msg.type == "sensor_data" then
-                local newAp   = msg.autopilot or false
-                local newArr  = msg.arrived   or false
-                local newFuel = msg.fuel       or 0
-
-                if not lastAutopilot and newAp and not newArr then
-                    soundQueue[#soundQueue + 1] = SOUNDS_PATH .. "autonav_start.dfpwm"
-                end
-                -- Stop only fires when AP was already running and we just arrived
-                if lastAutopilot and newAp and newArr and not lastArrived then
-                    soundQueue[#soundQueue + 1] = SOUNDS_PATH .. "autonav_stop.dfpwm"
-                end
-                if lastFuel > 3 and newFuel <= 3 and newFuel > 0 then
-                    soundQueue[#soundQueue + 1] = SOUNDS_PATH .. "fuel_low.dfpwm"
-                end
-                if lastFuel > 0 and newFuel == 0 then
-                    soundQueue[#soundQueue + 1] = SOUNDS_PATH .. "fuel_empty.dfpwm"
-                end
-
-                lastAutopilot = newAp
-                lastArrived   = newArr
-                lastFuel      = newFuel
-
-                local apStr
-                if not newAp then
-                    apStr = "OFF"
-                elseif newArr then
-                    apStr = "ARRIVED"
-                else
-                    apStr = "ON"
-                end
-
-                statusLine(3, string.format("  Speakers : %d found",    #speakers))
-                statusLine(4, string.format("  dfpwm    : %s",          dfpwm and "loaded" or "unavailable"))
-                statusLine(5, string.format("  Volume   : %.1f / 3.0",  soundVolume))
-                statusLine(6, string.format("  AP       : %s",          apStr))
-                statusLine(7, string.format("  Fuel     : %d/15",       newFuel))
+            local sig = bridge.getLinkSignal(WHISTLE_F1, WHISTLE_F2)
+            if lastSignal == 0 and sig > 0 then
+                playWhistle()
             end
+            lastSignal = sig
+
+            statusLine(3, string.format("  Signal   : %d/15", sig))
+            statusLine(4, string.format("  Trigger  : %s", sig > 0 and "ACTIVE" or "IDLE"))
+            statusLine(6, string.format("  Offset X : %d", offX))
+            statusLine(7, string.format("  Offset Y : %d", offY))
+            statusLine(8, string.format("  Offset Z : %d", offZ))
+            sleep(0.1)
         end
     end
 
     local function keyHandler()
         while true do
             local _, key = os.pullEvent("key")
-            if key == keys.equals or key == keys.numPadAdd then
-                soundVolume = math.min(3.0, soundVolume + 0.5)
-                cfg.soundVolume = soundVolume
+            local changed = false
+            if     key == keys.right    then offX = offX + 1; changed = true
+            elseif key == keys.left     then offX = offX - 1; changed = true
+            elseif key == keys.pageUp   then offY = offY + 1; changed = true
+            elseif key == keys.pageDown then offY = offY - 1; changed = true
+            elseif key == keys.up       then offZ = offZ - 1; changed = true
+            elseif key == keys.down     then offZ = offZ + 1; changed = true
+            end
+            if changed then
+                cfg.whistleOffX = offX
+                cfg.whistleOffY = offY
+                cfg.whistleOffZ = offZ
                 saveConfig(cfg)
-                statusLine(5, string.format("  Volume   : %.1f / 3.0", soundVolume))
-            elseif key == keys.minus or key == keys.numPadSubtract then
-                soundVolume = math.max(0.0, soundVolume - 0.5)
-                cfg.soundVolume = soundVolume
-                saveConfig(cfg)
-                statusLine(5, string.format("  Volume   : %.1f / 3.0", soundVolume))
             end
         end
     end
 
-    -- Draw static lines before loops start
-    statusLine(3, string.format("  Speakers : %d found",   #speakers))
-    statusLine(4, string.format("  dfpwm    : %s",         dfpwm and "loaded" or "unavailable"))
-    statusLine(5, string.format("  Volume   : %.1f / 3.0", soundVolume))
-    statusLine(6,  "  AP       : --")
-    statusLine(7,  "  Fuel     : --")
+    cls()
+    header("Whistle Module")
+    footer("[U] Restart All  [Arrows/PgUp/PgDn] Offset")
+    statusLine(5, "  --- Position Offset ---")
 
-    parallel.waitForAny(receiveLoop, soundLoop, keyHandler, restartListener)
+    parallel.waitForAny(controlLoop, keyHandler, restartListener)
 end
 
 --------------------------------------------------------------------------------
