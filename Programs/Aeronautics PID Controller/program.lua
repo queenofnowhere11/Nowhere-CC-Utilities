@@ -1,7 +1,7 @@
 -- Aeronautics PID Controller v2.0.2
 -- Height controller using Create: Avionics and CC: Redstone Link Bridge
 
-local VERSION        = "2.0.5"
+local VERSION        = "2.0.6"
 local CONFIG_PATH    = fs.getDir(shell.getRunningProgram()) .. "/config.json"
 local DEFAULT_KP     = 2.0
 local DEFAULT_KI     = 0.05
@@ -348,13 +348,9 @@ local function runCalibration(cfg)
             bridge.sendLinkSignal(cfg.outFreq1, cfg.outFreq2, cfg.invertOutput and (15 - output) or output)
 
             local stableCount = 0
-            local tooLow      = false
             while stableCount < 100 and not abortFlag do
                 local currentY  = altSensor.getHeight()
                 local velocityY = altSensor.getVerticalSpeed()
-                if currentY < cfg.minHeight - 30 then
-                    tooLow = true; break
-                end
                 if math.abs(velocityY) < 0.5 then
                     stableCount = stableCount + 1
                 else
@@ -365,10 +361,13 @@ local function runCalibration(cfg)
                 drawGraph(peripheral.find("monitor"), cfg)
                 sleep(LOOP_INTERVAL)
             end
-            if abortFlag or tooLow then break end
+            if abortFlag then break end
 
             local equilY = altSensor.getHeight()
             equilData[#equilData + 1] = { output = output, height = equilY }
+
+            -- Stop once an output level can no longer sustain minimum height
+            if equilY < cfg.minHeight then break end
 
             if prevEquil ~= nil and prevEquil > targetY and equilY <= targetY then
                 relayHigh = prevOut
