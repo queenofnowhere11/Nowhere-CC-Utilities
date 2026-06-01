@@ -1,7 +1,7 @@
 -- Aeronautics PID Controller v2.0.2
 -- Height controller using Create: Avionics and CC: Redstone Link Bridge
 
-local VERSION        = "2.0.4"
+local VERSION        = "2.0.5"
 local CONFIG_PATH    = fs.getDir(shell.getRunningProgram()) .. "/config.json"
 local DEFAULT_KP     = 2.0
 local DEFAULT_KI     = 0.05
@@ -409,6 +409,38 @@ local function runCalibration(cfg)
     if not relayLow then
         failScreen("  Target height unreachable with available outputs.\n  Adjust min/max height range or move aircraft.")
         return nil
+    end
+
+    -- Recovery: sweep may have pushed the aircraft low; climb back near targetY before relay
+    if altSensor.getHeight() < targetY - 30 then
+        term.clear()
+        drawHeader("Recovering Altitude...")
+        local recoverAbort = false
+        local function recoverClimb()
+            bridge.sendLinkSignal(cfg.outFreq1, cfg.outFreq2, cfg.invertOutput and (15 - relayHigh) or relayHigh)
+            while true do
+                local y = altSensor.getHeight()
+                local function row(r, label, val)
+                    term.setCursorPos(1, r)
+                    fg(colours.lightGrey); term.write(label); resetColors()
+                    term.write(tostring(val))
+                end
+                row(3, "Climbing to:    ", string.format("%.1f m", targetY))
+                row(4, "Current height: ", string.format("%.1f m", y))
+                drawFooter("[Q] Abort")
+                if y >= targetY - 10 then break end
+                sleep(LOOP_INTERVAL)
+            end
+        end
+        local function recoverAbortKey()
+            while not recoverAbort do
+                local _, key = os.pullEvent("key")
+                if key == keys.q then recoverAbort = true end
+            end
+        end
+        parallel.waitForAny(recoverClimb, recoverAbortKey)
+        bridge.sendLinkSignal(cfg.outFreq1, cfg.outFreq2, cfg.invertOutput and 15 or 0)
+        if recoverAbort then return nil end
     end
 
     local RELAY_AMP = (relayHigh - relayLow) / 2  -- 0.5 for adjacent integer outputs
