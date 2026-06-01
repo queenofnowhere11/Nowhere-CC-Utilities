@@ -1,7 +1,7 @@
 -- Aeronautics PID Controller v2.0.2
 -- Height controller using Create: Avionics and CC: Redstone Link Bridge
 
-local VERSION        = "2.0.2"
+local VERSION        = "2.0.3"
 local CONFIG_PATH    = fs.getDir(shell.getRunningProgram()) .. "/config.json"
 local DEFAULT_KP     = 2.0
 local DEFAULT_KI     = 0.05
@@ -121,8 +121,8 @@ local function drawStatus(currentY, targetY, rawSignal, output, err, cfg)
 
     term.setCursorPos(1, 8)
     fg(colours.lightGrey)
-    local invTag = cfg.invertInput and "  [INV]" or ""
-    term.write(string.format("Kp=%.2f  Ki=%.3f  Kd=%.2f%s", cfg.kp, cfg.ki, cfg.kd, invTag))
+    local tags = (cfg.invertInput and " [INV-IN]" or "") .. (cfg.invertOutput and " [INV-OUT]" or "")
+    term.write(string.format("Kp=%.2f  Ki=%.3f  Kd=%.2f%s", cfg.kp, cfg.ki, cfg.kd, tags))
     resetColors()
 
     drawFooter("[Q] Quit  [R] Config  [C] Calibrate")
@@ -235,8 +235,13 @@ local function runSetup(existing)
 
     print("")
     print("-- Input Direction --")
-    local inv = prompt("Invert? 15=MinHeight (y/n)", e.invertInput and "y" or "n")
+    local inv = prompt("Invert input? 15=MinHeight (y/n)", e.invertInput and "y" or "n")
     cfg.invertInput = (inv == "y" or inv == true)
+
+    print("")
+    print("-- Output Direction --")
+    local invOut = prompt("Invert output? 0=MaxThrust (y/n)", e.invertOutput and "y" or "n")
+    cfg.invertOutput = (invOut == "y" or invOut == true)
 
     print("")
     print("-- PID Gains --")
@@ -341,7 +346,7 @@ local function runCalibration(cfg)
         local searchDir = nil
 
         while not abortFlag do
-            bridge.sendLinkSignal(cfg.outFreq1, cfg.outFreq2, output)
+            bridge.sendLinkSignal(cfg.outFreq1, cfg.outFreq2, cfg.invertOutput and (15 - output) or output)
 
             local stableCount = 0
             while stableCount < 100 and not abortFlag do
@@ -400,7 +405,7 @@ local function runCalibration(cfg)
     end
 
     parallel.waitForAny(bracketSearch, abortListener1)
-    bridge.sendLinkSignal(cfg.outFreq1, cfg.outFreq2, 0)
+    bridge.sendLinkSignal(cfg.outFreq1, cfg.outFreq2, cfg.invertOutput and 15 or 0)
 
     if not abortFlag and not searchFail and #equilData >= 2 then
         cfg.equilMap = equilData
@@ -445,7 +450,7 @@ local function runCalibration(cfg)
             end
 
             relayOut = (currentY < targetY) and relayHigh or relayLow
-            bridge.sendLinkSignal(cfg.outFreq1, cfg.outFreq2, relayOut)
+            bridge.sendLinkSignal(cfg.outFreq1, cfg.outFreq2, cfg.invertOutput and (15 - relayOut) or relayOut)
 
             if prevY ~= nil then
                 if direction == 0 then
@@ -498,7 +503,7 @@ local function runCalibration(cfg)
     end
 
     parallel.waitForAny(relayLoop, abortListener2)
-    bridge.sendLinkSignal(cfg.outFreq1, cfg.outFreq2, 0)
+    bridge.sendLinkSignal(cfg.outFreq1, cfg.outFreq2, cfg.invertOutput and 15 or 0)
 
     if calibAbort then return nil end
     if safetyFail then
@@ -621,7 +626,7 @@ local function controlLoop()
         local outputF   = ff + cfg.kp * err + cfg.ki * integral + cfg.kd * (-velocityY)
         local output    = clamp(math.floor(outputF + 0.5), 0, 15)
 
-        bridge.sendLinkSignal(cfg.outFreq1, cfg.outFreq2, output)
+        bridge.sendLinkSignal(cfg.outFreq1, cfg.outFreq2, cfg.invertOutput and (15 - output) or output)
         pushHistory(currentY, targetY)
         drawStatus(currentY, targetY, rawSignal, output, err, cfg)
         drawGraph(peripheral.find("monitor"), cfg)
@@ -648,7 +653,7 @@ while true do
     parallel.waitForAny(controlLoop, keyListener)
 
     if action == "quit" then
-        bridge.sendLinkSignal(cfg.outFreq1, cfg.outFreq2, 0)
+        bridge.sendLinkSignal(cfg.outFreq1, cfg.outFreq2, cfg.invertOutput and 15 or 0)
         term.clear()
         term.setCursorPos(1, 1)
         resetColors()
