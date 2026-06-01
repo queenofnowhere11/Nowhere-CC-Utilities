@@ -16,7 +16,7 @@
       "id": "aeronautics-pid",
       "name": "Aeronautics PID Controller",
       "description": "PID flight controller for Create: Aeronautics",
-      "version": "2.0.3",
+      "version": "2.0.4",
       "main": "program.lua",
       "files": [
         { "src": "Programs/Aeronautics PID Controller/program.lua", "dest": "program.lua" }

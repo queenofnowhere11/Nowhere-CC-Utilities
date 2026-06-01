@@ -1,7 +1,7 @@
 -- Aeronautics PID Controller v2.0.2
 -- Height controller using Create: Avionics and CC: Redstone Link Bridge
 
-local VERSION        = "2.0.3"
+local VERSION        = "2.0.4"
 local CONFIG_PATH    = fs.getDir(shell.getRunningProgram()) .. "/config.json"
 local DEFAULT_KP     = 2.0
 local DEFAULT_KI     = 0.05
@@ -316,14 +316,13 @@ local function runCalibration(cfg)
         elseif key == keys.q then return nil end
     end
 
-    -- Phase B: Bracket search
-    local relayLow   = nil
-    local relayHigh  = nil
-    local abortFlag  = false
-    local searchFail = false
-    local equilData  = {}
+    -- Phase B: Linear sweep from max thrust to lowest sustaining thrust
+    local relayLow  = nil
+    local relayHigh = nil
+    local abortFlag = false
+    local equilData = {}
 
-    local function drawBracketStatus(output, currentY, velocityY, stableCount)
+    local function drawSweepStatus(output, currentY, velocityY, stableCount)
         term.clear()
         drawHeader("Finding Hover Point...")
         local function row(r, label, val)
@@ -331,7 +330,7 @@ local function runCalibration(cfg)
             fg(colours.lightGrey); term.write(label); resetColors()
             term.write(tostring(val))
         end
-        row(3, "Test output:    ", output .. "/15")
+        row(3, "Test output:    ", string.format("%d/15  (%d pts collected)", output, #equilData))
         row(4, "Current height: ", string.format("%.2f", currentY))
         row(5, "Velocity:       ", string.format("%.2f", velocityY) .. " b/s")
         row(6, "Target height:  ", string.format("%.2f", targetY))
@@ -339,61 +338,45 @@ local function runCalibration(cfg)
         drawFooter("[Q] Abort")
     end
 
-    local function bracketSearch()
-        local output    = 8
+    local function sweepSearch()
         local prevEquil = nil
         local prevOut   = nil
-        local searchDir = nil
 
-        while not abortFlag do
+        for output = 15, 0, -1 do
+            if abortFlag then break end
+
             bridge.sendLinkSignal(cfg.outFreq1, cfg.outFreq2, cfg.invertOutput and (15 - output) or output)
 
             local stableCount = 0
+            local tooLow      = false
             while stableCount < 100 and not abortFlag do
                 local currentY  = altSensor.getHeight()
                 local velocityY = altSensor.getVerticalSpeed()
+                if currentY < cfg.minHeight - 30 then
+                    tooLow = true; break
+                end
                 if math.abs(velocityY) < 0.5 then
                     stableCount = stableCount + 1
                 else
                     stableCount = 0
                 end
-                if currentY < cfg.minHeight - 10 or currentY > cfg.maxHeight + 10 then
-                    abortFlag = true; break
-                end
                 pushHistory(currentY, targetY)
-                drawBracketStatus(output, currentY, velocityY, stableCount)
+                drawSweepStatus(output, currentY, velocityY, stableCount)
                 drawGraph(peripheral.find("monitor"), cfg)
                 sleep(LOOP_INTERVAL)
             end
-            if abortFlag then break end
+            if abortFlag or tooLow then break end
 
             local equilY = altSensor.getHeight()
             equilData[#equilData + 1] = { output = output, height = equilY }
 
-            if searchDir == nil then
-                searchDir = equilY > targetY and -1 or 1
-            end
-
-            if prevEquil ~= nil then
-                local crossed = (prevEquil < targetY and equilY >= targetY)
-                             or (prevEquil > targetY and equilY <= targetY)
-                if crossed then
-                    if prevEquil < targetY then
-                        relayLow = prevOut; relayHigh = output
-                    else
-                        relayLow = output;  relayHigh = prevOut
-                    end
-                    break
-                end
+            if prevEquil ~= nil and prevEquil > targetY and equilY <= targetY then
+                relayHigh = prevOut
+                relayLow  = output
             end
 
             prevEquil = equilY
             prevOut   = output
-            output    = output + searchDir
-
-            if output < 0 or output > 15 then
-                searchFail = true; break
-            end
         end
     end
 
@@ -404,10 +387,10 @@ local function runCalibration(cfg)
         end
     end
 
-    parallel.waitForAny(bracketSearch, abortListener1)
+    parallel.waitForAny(sweepSearch, abortListener1)
     bridge.sendLinkSignal(cfg.outFreq1, cfg.outFreq2, cfg.invertOutput and 15 or 0)
 
-    if not abortFlag and not searchFail and #equilData >= 2 then
+    if not abortFlag and #equilData >= 2 then
         cfg.equilMap = equilData
         saveConfig(cfg)
     end
@@ -422,8 +405,8 @@ local function runCalibration(cfg)
         os.pullEvent("key")
     end
 
-    if abortFlag  then return nil end
-    if searchFail then
+    if abortFlag then return nil end
+    if not relayLow then
         failScreen("  Target height unreachable with available outputs.\n  Adjust min/max height range or move aircraft.")
         return nil
     end
